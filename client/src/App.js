@@ -1,6 +1,12 @@
 // App_20sensors.jsx — adapté pour cascade Messkoffer + mapping CH→SensorN
-import React, { useEffect, useState, useCallback, useRef, memo, useMemo } from "react";
+// ✅ Design harmonisé avec le portail principal mE2go (mêmes tokens de couleur,
+// même typographie, mêmes cartes à bordure fine sans ombre lourde, mêmes
+// pastilles de statut). Toute la logique métier de cette version (état, appels
+// API, décodage des labels, polling) est strictement inchangée — seul
+// l'habillage visuel a été repris.
+import React, { useEffect, useState, useCallback, memo } from "react";
 import axios from "axios";
+import { ThemeProvider, createTheme } from "@mui/material/styles";
 import {
   Paper, Typography, Box, Button, Divider,
   MenuItem, Checkbox, ListItemText, TextField, Alert,
@@ -26,29 +32,102 @@ import SaveIcon from "@mui/icons-material/Save";
 import FilterListIcon from "@mui/icons-material/FilterList";
 import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import UpdateIcon from "@mui/icons-material/Update";
+import SyncIcon from "@mui/icons-material/Sync";
 import SearchIcon from "@mui/icons-material/Search";
 import TuneIcon from "@mui/icons-material/Tune";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
 import RestartAltIcon from "@mui/icons-material/RestartAlt";
-import BoltIcon from "@mui/icons-material/Bolt";
 import SettingsInputComponentIcon from "@mui/icons-material/SettingsInputComponent";
 import EditNoteIcon from "@mui/icons-material/EditNote";
 import ScheduleIcon from "@mui/icons-material/Schedule";
 import SendIcon from "@mui/icons-material/Send";
-import RefreshIcon from "@mui/icons-material/Refresh";
 import LabelImportantOutlinedIcon from "@mui/icons-material/LabelImportantOutlined";
 import {
   LineChart, Line, XAxis, YAxis, Tooltip as RTooltip, Legend, CartesianGrid, ResponsiveContainer
 } from "recharts";
 
+// =================== DESIGN-TOKENS (identisch zum mE2go-Hauptportal) ===================
+const INK        = '#111827';
+const INK_MUTED  = '#667085';
+const SURFACE    = '#F3F5F7';
+const PANEL      = '#FFFFFF';
+const BORDER     = '#E3E6EB';
+const SUCCESS    = '#1E8A5D';
+const SUCCESS_BG = '#E7F5EE';
+const DANGER     = '#C0392B';
+const DANGER_BG  = '#FBEAE8';
+const WARNING    = '#B7791F';
+const WARNING_BG = '#FBF1DE';
+const BRAND      = '#0a5e8c';
+const BRAND_BG   = '#E9F2F7';
+const ACCENT     = '#e67e22';
+const ACCENT_BG  = '#FCEEE0';
+const READOUT_BG = '#0d141b';
+const MONO_FONT    = '"IBM Plex Mono","JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace';
+const DISPLAY_FONT = '"IBM Plex Sans","Inter","Segoe UI", sans-serif';
+
+const theme = createTheme({
+  palette: {
+    primary:   { main: BRAND },
+    secondary: { main: ACCENT },
+    success:   { main: SUCCESS },
+    error:     { main: DANGER },
+    warning:   { main: WARNING }
+  },
+  typography: {
+    fontFamily: DISPLAY_FONT,
+    h4: { fontWeight: 700, letterSpacing: '-0.01em' },
+    h5: { fontWeight: 700 },
+    h6: { fontWeight: 700 },
+  },
+  shape: { borderRadius: 14 },
+  components: {
+    MuiPaper: {
+      styleOverrides: {
+        root: {
+          backgroundImage: 'none',
+          border: `1px solid ${BORDER}`,
+        }
+      }
+    },
+    MuiButton: {
+      styleOverrides: {
+        root: { textTransform: 'none', fontWeight: 700 }
+      }
+    },
+    MuiChip: {
+      styleOverrides: {
+        root: { fontWeight: 700 }
+      }
+    }
+  }
+});
+
 const API_BASE_URL = `${window.location.protocol}//${window.location.hostname}:4000`;
 const STARTSEITE_URL = "http://192.168.1.20:8080";
-const PRIMARY_COLOR = "#7cbbcd";
 
 const formatChannelName  = (ch) => ch;
-const formatChannelShort = (ch) => ch;
+
+// ✅ Rendu à deux tons (même style que le portail) : préfixe "CH" + numéro de
+// groupe en gris discret, lettre du canal en couleur marque et en gras.
+// Le nom du canal n'est PAS modifié (toujours "CH1 a", etc.).
+const getChannelParts = (ch) => {
+  const m = String(ch).match(/^CH(\d+)\s+([a-r])$/i);
+  return m ? { group: m[1], letter: m[2] } : null;
+};
+
+const ChannelLabel = ({ channel, letterColor = BRAND }) => {
+  const parts = getChannelParts(channel);
+  if (!parts) return <>{formatChannelName(channel)}</>;
+  return (
+    <Box component="span" sx={{ display: "inline-flex", alignItems: "baseline", gap: "4px" }}>
+      <Box component="span" sx={{ color: INK_MUTED, fontWeight: 600, fontSize: "0.75em", letterSpacing: "0.3px" }}>CH{parts.group}</Box>
+      <Box component="span" sx={{ color: letterColor, fontWeight: 800 }}>{parts.letter}</Box>
+    </Box>
+  );
+};
 
 // ✅ Décodage sûr des labels : certains labels remontent du backend sous forme
 // percent-encodée (ex. "Lüftung" → "L%FCftung") si l'encodage UTF-8 n'a pas été
@@ -58,14 +137,10 @@ const formatChannelShort = (ch) => ch;
 const safeDecodeLabel = (str) => {
   if (typeof str !== "string" || str.length === 0) return str;
   if (!/%[0-9A-Fa-f]{2}/.test(str)) return str;
-  // 1) Cas UTF-8 percent-encodé standard (ex. "%C3%BC" pour "ü").
   try {
     const viaUri = decodeURIComponent(str);
     if (viaUri !== str) return viaUri;
   } catch { /* pas de l'UTF-8 percent-encodé valide, on continue */ }
-  // 2) Cas Latin-1 à l'ancienne via escape() côté source (ex. "%FC" pour "ü",
-  //    0xFC = 252 = "ü" en Latin-1/Windows-1252). decodeURIComponent échoue
-  //    silencieusement (ou ne change rien) sur ce format ; unescape() le gère.
   try {
     const viaUnescape = unescape(str);
     if (viaUnescape !== str) return viaUnescape;
@@ -73,44 +148,20 @@ const safeDecodeLabel = (str) => {
   return str;
 };
 
-// ✅ Nouveau nommage des 18 canaux physiques (aligné avec le backend et le flow
-// Node-RED) : CH1 a..f (phase L1), CH2 g..l (phase L2), CH3 m..r (phase L3).
-// Utilisé uniquement comme SECOURS si /config est injoignable au démarrage —
-// en fonctionnement normal, orderedChannels vient directement de /config.
+// ✅ Nommage des 18 canaux physiques — SECOURS si /config est injoignable.
 const DEFAULT_CHANNELS = [
   "CH1 a", "CH1 b", "CH1 c", "CH1 d", "CH1 e", "CH1 f",
   "CH2 g", "CH2 h", "CH2 i", "CH2 j", "CH2 k", "CH2 l",
   "CH3 m", "CH3 n", "CH3 o", "CH3 p", "CH3 q", "CH3 r"
 ];
 
-// ── Design-Tokens (Enterprise / Industrie) ────────────────────────────────
-// Angelehnt an die reale DIN/IEC-Aderfarbe der drei Phasenleiter (L1 braun,
-// L2 schwarz, L3 grau) — so bleibt die Farbcodierung fachlich korrekt und
-// sofort wiedererkennbar für Elektrofachpersonal, statt generischer Bunttöne.
-const INK        = "#111827";
-const INK_MUTED  = "#667085";
-const SURFACE    = "#F3F5F7";
-const PANEL      = "#FFFFFF";
-const BORDER     = "#E3E6EB";
-const SUCCESS    = "#1E8A5D";
-const SUCCESS_BG = "#E7F5EE";
-const WARNING    = "#B7791F";
-const WARNING_BG = "#FBF1DE";
-const DANGER     = "#C0392B";
-const DANGER_BG  = "#FBEAE8";
-const MONO_FONT    = '"IBM Plex Mono","JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace';
-const DISPLAY_FONT = '"IBM Plex Sans","Inter","Segoe UI", sans-serif';
-
+// Phasenfarben nach IEC-Aderfarbe (L1 braun, L2 schwarz, L3 grau)
 const PHASE_STYLES = [
   { tag: "L1", color: "#7A5230", bg: "#F7EFE6", name: "Phase 1" },
   { tag: "L2", color: "#22262B", bg: "#ECEDEF", name: "Phase 2" },
   { tag: "L3", color: "#525C68", bg: "#EEF1F3", name: "Phase 3" },
 ];
 
-// ✅ CORRECTION : "Energie_temp" → "Energie" pour correspondre au champ réel
-// renvoyé par /history/:channel (measurement "mego4"), sinon dataKey="Energie_temp"
-// de <Line> dans GraphDetail ne trouve jamais la valeur et le graphique reste vide
-// ("Keine historische Daten" alors que la valeur existe bien dans InfluxDB).
 const METRIC_LABELS = {
   Strom:        "Strom (A)",
   Wirkleistung: "Wirkleistung (W)",
@@ -159,6 +210,25 @@ const formatRelativeTime = (iso) => {
   return `vor ${diffD} T`;
 };
 
+// ─── Petit badge de valeur (chiffre en mono, cohérent avec le portail) ──────
+const ValueBadge = ({ children, muted = false }) => (
+  <Box sx={{
+    bgcolor: SURFACE, border: `1px solid ${BORDER}`, px: "10px", py: "3px", borderRadius: "8px",
+    minWidth: 92, textAlign: "center"
+  }}>
+    <Typography variant="caption" sx={{ fontFamily: MONO_FONT, fontWeight: 700, color: muted ? INK_MUTED : INK }}>
+      {children}
+    </Typography>
+  </Box>
+);
+
+// ─── En-tête de section (barre de couleur en haut + icône dans un carré arrondi) ──
+const SectionHeaderIcon = ({ Icon, color = BRAND, bg = BRAND_BG }) => (
+  <Box sx={{ display: 'inline-flex', width: 44, height: 44, borderRadius: '12px', bgcolor: bg, alignItems: 'center', justifyContent: 'center' }}>
+    <Icon sx={{ color, fontSize: 24 }} />
+  </Box>
+);
+
 // ─── FILTER BAR ───────────────────────────────────────────────────────────────
 const FilterBar = memo(({
   selectedChannels, selectedMetrics,
@@ -167,6 +237,7 @@ const FilterBar = memo(({
   onResetFilters, hasActiveFilters,
   orderedChannels, metricOptions,
   mobileDrawer = false,
+  itemsLabel = "Kanäle",
 }) => {
   const isMobile = useMediaQuery("(max-width:600px)");
   const [drawerOpen, setDrawerOpen]           = useState(false);
@@ -200,13 +271,13 @@ const FilterBar = memo(({
       <Box sx={{ p: 2, minWidth: 250, maxWidth: 350 }}>
         <FormControlLabel
           control={<Checkbox checked={selChCount === totChCount} indeterminate={selChCount > 0 && selChCount < totChCount} onChange={onSelectAllChannels} />}
-          label="Alle Kanäle" />
+          label={`Alle ${itemsLabel}`} />
         <Divider sx={{ my: 1 }} />
         <Box sx={{ maxHeight: 300, overflow: "auto" }}>
           {orderedChannels.map(ch => (
             <FormControlLabel key={ch}
               control={<Checkbox checked={selectedChannels.includes(ch)} onChange={() => handleChannelToggle(ch)} />}
-              label={formatChannelShort(ch)} sx={{ display: "block" }} />
+              label={<ChannelLabel channel={ch} />} sx={{ display: "block" }} />
           ))}
         </Box>
       </Box>
@@ -236,19 +307,19 @@ const FilterBar = memo(({
 
   const drawerContent = (
     <Box sx={{ p: 2, width: 280 }}>
-      <Typography variant="h6" gutterBottom>Filter</Typography>
-      <Typography variant="subtitle2" gutterBottom>Kanäle</Typography>
+      <Typography variant="h6" gutterBottom sx={{ color: INK }}>Filter</Typography>
+      <Typography variant="subtitle2" gutterBottom sx={{ color: INK_MUTED }}>{itemsLabel}</Typography>
       <Box sx={{ mb: 2, maxHeight: 200, overflow: "auto" }}>
         <FormControlLabel
           control={<Checkbox checked={selChCount === totChCount} indeterminate={selChCount > 0 && selChCount < totChCount} onChange={onSelectAllChannels} />}
-          label="Alle Kanäle" />
+          label={`Alle ${itemsLabel}`} />
         {orderedChannels.map(ch => (
           <FormControlLabel key={ch}
             control={<Checkbox checked={selectedChannels.includes(ch)} onChange={() => handleChannelToggle(ch)} />}
-            label={formatChannelShort(ch)} />
+            label={<ChannelLabel channel={ch} />} />
         ))}
       </Box>
-      <Typography variant="subtitle2" gutterBottom>Messgrößen</Typography>
+      <Typography variant="subtitle2" gutterBottom sx={{ color: INK_MUTED }}>Messgrößen</Typography>
       <Box sx={{ mb: 2, maxHeight: 200, overflow: "auto" }}>
         <FormControlLabel
           control={<Checkbox checked={selMtCount === totMtCount} indeterminate={selMtCount > 0 && selMtCount < totMtCount} onChange={onSelectAllMetrics} />}
@@ -261,7 +332,7 @@ const FilterBar = memo(({
       </Box>
       <Button fullWidth variant="contained" onClick={() => { onResetFilters(); setDrawerOpen(false); }}
         startIcon={<ClearAllIcon />} disabled={!hasActiveFilters}
-        sx={{ backgroundColor: hasActiveFilters ? "#d32f2f" : "#ccc", borderRadius: 2 }}>
+        sx={{ bgcolor: hasActiveFilters ? DANGER : BORDER, color: hasActiveFilters ? '#fff' : INK_MUTED, borderRadius: 20, boxShadow: 'none' }}>
         Filter zurücksetzen
       </Button>
     </Box>
@@ -271,7 +342,8 @@ const FilterBar = memo(({
     return (
       <>
         <Badge badgeContent={selChCount + selMtCount} color="primary">
-          <Button variant="outlined" onClick={() => setDrawerOpen(true)} startIcon={<FilterListIcon />} size="small">Filter</Button>
+          <Button variant="outlined" onClick={() => setDrawerOpen(true)} startIcon={<FilterListIcon />} size="small"
+            sx={{ borderColor: BORDER, color: INK }}>Filter</Button>
         </Badge>
         <Drawer anchor="right" open={drawerOpen} onClose={() => setDrawerOpen(false)}>{drawerContent}</Drawer>
       </>
@@ -281,17 +353,17 @@ const FilterBar = memo(({
   return (
     <Box display="flex" alignItems="center" gap={2} flexWrap="wrap">
       <Button variant="outlined" onClick={e => { e.stopPropagation(); setChannelAnchorEl(e.currentTarget); }}
-        endIcon={<span>▼</span>} sx={{ minWidth: 150, borderRadius: 2, textTransform: "none" }}>
-        {selChCount === 0 || selChCount === totChCount ? "Alle Kanäle" : `${selChCount} Kanäle`}
+        endIcon={<span>▼</span>} sx={{ minWidth: 150, borderRadius: 20, borderColor: BORDER, color: INK }}>
+        {selChCount === 0 || selChCount === totChCount ? `Alle ${itemsLabel}` : `${selChCount} ${itemsLabel}`}
       </Button>
       {channelPopover}
       <Button variant="outlined" onClick={e => { e.stopPropagation(); setMetricAnchorEl(e.currentTarget); }}
-        endIcon={<span>▼</span>} sx={{ minWidth: 150, borderRadius: 2, textTransform: "none" }}>
+        endIcon={<span>▼</span>} sx={{ minWidth: 150, borderRadius: 20, borderColor: BORDER, color: INK }}>
         {selMtCount === 0 || selMtCount === totMtCount ? "Alle Messgrößen" : `${selMtCount} Messgrößen`}
       </Button>
       {metricPopover}
       <Button variant="contained" onClick={onResetFilters} startIcon={<ClearAllIcon />} disabled={!hasActiveFilters}
-        sx={{ backgroundColor: hasActiveFilters ? "#d32f2f" : "#ccc", borderRadius: 2, textTransform: "none" }}>
+        sx={{ bgcolor: hasActiveFilters ? DANGER : BORDER, color: hasActiveFilters ? '#fff' : INK_MUTED, borderRadius: 20, boxShadow: 'none', '&:hover': { bgcolor: hasActiveFilters ? '#A53023' : BORDER, boxShadow: 'none' } }}>
         Filter zurücksetzen
       </Button>
     </Box>
@@ -306,20 +378,19 @@ const GraphDetail = ({ selectedChannel, historyData, isMouseOverGraph, setIsMous
   const [timeAnchorEl, setTimeAnchorEl]     = useState(null);
 
   const formatXAxis    = tick => new Date(tick).toLocaleTimeString();
-  const displayName    = selectedChannel ? formatChannelName(selectedChannel) : "";
   const getMetricLabel = () => METRIC_LABELS[selectedMetric] || selectedMetric;
   const getTimeLabel   = () => TIME_RANGE_OPTIONS.find(o => o.value === timeRange)?.label || timeRange;
 
   return (
     <Box>
-      <Paper sx={{ p: 2, mb: 2, display: "flex", alignItems: "center", gap: 2, flexWrap: "wrap" }}>
-        <Button startIcon={<ArrowBackIcon />} onClick={onBack} variant="outlined" sx={{ textTransform: "none" }}>
+      <Paper elevation={0} sx={{ p: 2, mb: 2, display: "flex", alignItems: "center", gap: 2, flexWrap: "wrap", bgcolor: PANEL }}>
+        <Button startIcon={<ArrowBackIcon />} onClick={onBack} variant="outlined" sx={{ borderColor: BORDER, color: INK }}>
           Zurück zum Menü
         </Button>
-        <Typography variant="h5">{displayName}</Typography>
+        <Typography variant="h5" sx={{ color: INK }}>{selectedChannel ? <ChannelLabel channel={selectedChannel} /> : ""}</Typography>
 
         <Button variant="outlined" onClick={e => setMetricAnchorEl(e.currentTarget)}
-          endIcon={<span>▼</span>} sx={{ minWidth: 150, textTransform: "none" }}>
+          endIcon={<span>▼</span>} sx={{ minWidth: 150, borderColor: BORDER, color: INK }}>
           {getMetricLabel()}
         </Button>
         <Menu anchorEl={metricAnchorEl} open={Boolean(metricAnchorEl)}
@@ -338,7 +409,7 @@ const GraphDetail = ({ selectedChannel, historyData, isMouseOverGraph, setIsMous
         </Menu>
 
         <Button variant="outlined" onClick={e => setTimeAnchorEl(e.currentTarget)}
-          endIcon={<span>▼</span>} sx={{ minWidth: 150, textTransform: "none" }}>
+          endIcon={<span>▼</span>} sx={{ minWidth: 150, borderColor: BORDER, color: INK }}>
           {getTimeLabel()}
         </Button>
         <Menu anchorEl={timeAnchorEl} open={Boolean(timeAnchorEl)}
@@ -356,30 +427,30 @@ const GraphDetail = ({ selectedChannel, historyData, isMouseOverGraph, setIsMous
           ))}
         </Menu>
 
-        <Typography variant="caption" style={{ color: "#666" }}>
-          {isMouseOverGraph ? "⏸ Pause (Maus über Grafik)" : " Aktualisierung alle 1 Sekunde"}
-        </Typography>
+        <Chip size="small" icon={<SyncIcon sx={{ fontSize: '13px !important' }} />}
+          label={isMouseOverGraph ? "Pause (Maus über Grafik)" : "Aktualisierung jede Sekunde"}
+          sx={{ bgcolor: SURFACE, color: INK_MUTED }} />
       </Paper>
 
-      <Paper sx={{ p: 2, height: "60vh" }}
+      <Paper elevation={0} sx={{ p: 2, height: "60vh", bgcolor: PANEL }}
         onMouseEnter={() => setIsMouseOverGraph(true)}
         onMouseLeave={() => setIsMouseOverGraph(false)}>
         {historyData.length === 0 ? (
-          <Typography align="center" color="text.secondary">Keine historischen Daten.</Typography>
+          <Typography align="center" sx={{ color: INK_MUTED }}>Keine historischen Daten.</Typography>
         ) : (
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={historyData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
-              <CartesianGrid stroke="#ddd" strokeDasharray="5 5" />
+              <CartesianGrid stroke={BORDER} strokeDasharray="5 5" />
               <XAxis dataKey="time" tickFormatter={formatXAxis} angle={-30} textAnchor="end" height={60}
-                tick={{ fontSize: 11, fill: "#333" }} axisLine={{ stroke: "#888", strokeWidth: 1 }} />
-              <YAxis tick={{ fontSize: 11, fill: "#333" }} axisLine={{ stroke: "#888", strokeWidth: 1 }}
+                tick={{ fontSize: 11, fill: INK_MUTED }} axisLine={{ stroke: BORDER, strokeWidth: 1 }} />
+              <YAxis tick={{ fontSize: 11, fill: INK_MUTED }} axisLine={{ stroke: BORDER, strokeWidth: 1 }}
                 label={{ value: METRIC_LABELS[selectedMetric], angle: -90, position: "insideLeft",
-                  style: { textAnchor: "middle", fill: "#555", fontSize: 12 } }} />
+                  style: { textAnchor: "middle", fill: INK_MUTED, fontSize: 12 } }} />
               <RTooltip labelFormatter={t => new Date(t).toLocaleString()}
                 wrapperStyle={{ pointerEvents: "auto" }}
-                contentStyle={{ backgroundColor: "#fff", border: "1px solid #ccc", borderRadius: 6, fontSize: 12 }} />
+                contentStyle={{ backgroundColor: PANEL, border: `1px solid ${BORDER}`, borderRadius: 8, fontSize: 12 }} />
               <Legend wrapperStyle={{ fontSize: 12, paddingTop: 10 }} />
-              <Line type="monotone" dataKey={selectedMetric} stroke="#E67E22" strokeWidth={2.5}
+              <Line type="monotone" dataKey={selectedMetric} stroke={ACCENT} strokeWidth={2.5}
                 name={METRIC_LABELS[selectedMetric]} dot={false} isAnimationActive={false}
                 connectNulls activeDot={{ r: 6, stroke: "#fff", strokeWidth: 2 }} />
             </LineChart>
@@ -391,9 +462,6 @@ const GraphDetail = ({ selectedChannel, historyData, isMouseOverGraph, setIsMous
 };
 
 // ─── KANAL-KONFIGURATION ──────────────────────────────────────────────────────
-// Enterprise-Redesign: Phasenfarbcodierung nach IEC-Aderfarbe (L1 braun, L2
-// schwarz, L3 grau), Suchfeld + Phasen-/Status-Filter mit Zähler-Chips,
-// Änderungsverfolgung (unsaved changes) und Statusprüfung Schwellwert/Höchstwert.
 const CONFIG_STATUS = {
   ok:      { label: "OK",             color: SUCCESS, bg: SUCCESS_BG, Icon: CheckCircleIcon },
   warn:    { label: "Prüfen",         color: WARNING, bg: WARNING_BG, Icon: WarningAmberIcon },
@@ -408,6 +476,8 @@ const getConfigRowStatus = (cfg) => {
   return "ok";
 };
 
+const thStyle = { padding: "12px", textAlign: "left", color: INK_MUTED, fontSize: '0.8rem' };
+
 const ChannelConfigManager = () => {
   const [config, setConfig]           = useState({});
   const [savedConfig, setSavedConfig] = useState({});
@@ -416,8 +486,8 @@ const ChannelConfigManager = () => {
   const [message, setMessage]         = useState("");
   const [messageType, setMessageType] = useState("success");
   const [searchTerm, setSearchTerm]   = useState("");
-  const [phaseFilter, setPhaseFilter] = useState([]);   // [] = alle Phasen
-  const [statusFilter, setStatusFilter] = useState("all"); // all | warn | error
+  const [phaseFilter, setPhaseFilter] = useState([]);
+  const [statusFilter, setStatusFilter] = useState("all");
   const isMobile = useMediaQuery("(max-width:600px)");
 
   const loadConfig = async () => {
@@ -426,9 +496,6 @@ const ChannelConfigManager = () => {
       const timeoutId  = setTimeout(() => controller.abort(), 5000);
       const res        = await axios.get(`${API_BASE_URL}/config`, { signal: controller.signal });
       clearTimeout(timeoutId);
-      // ✅ On décode les labels dès la réception pour éviter d'afficher des
-      // séquences percent-encodées (ex. "L%FCftung") si le backend ne renvoie
-      // pas un UTF-8 propre.
       const decoded = Object.fromEntries(
         Object.entries(res.data).map(([ch, cfg]) => [ch, { ...cfg, label: safeDecodeLabel(cfg?.label) }])
       );
@@ -468,20 +535,14 @@ const ChannelConfigManager = () => {
   const togglePhase = (idx) =>
     setPhaseFilter(prev => prev.includes(idx) ? prev.filter(p => p !== idx) : [...prev, idx]);
 
-  if (loading) {
-    return (
-      <Paper elevation={0} sx={{ p: 4, mt: 3, textAlign: "center", border: `1px dashed ${BORDER}`, borderRadius: 2 }}>
-        <Typography sx={{ color: INK_MUTED, fontFamily: DISPLAY_FONT }}>Konfiguration wird geladen…</Typography>
-      </Paper>
-    );
-  }
+  if (loading) return <Typography sx={{ color: INK_MUTED }}>Konfiguration wird geladen...</Typography>;
 
   const entries = Object.entries(config).filter(([key]) => !key.startsWith("L"));
   const chunkSize = Math.ceil(entries.length / 3) || 1;
   const groups  = [
-    { channels: entries.slice(0, chunkSize),              phase: PHASE_STYLES[0] },
-    { channels: entries.slice(chunkSize, chunkSize * 2),  phase: PHASE_STYLES[1] },
-    { channels: entries.slice(chunkSize * 2),             phase: PHASE_STYLES[2] },
+    { channels: entries.slice(0, chunkSize),              phase: PHASE_STYLES[0], bgColor: SURFACE   },
+    { channels: entries.slice(chunkSize, chunkSize * 2),  phase: PHASE_STYLES[1], bgColor: '#EEF1F4' },
+    { channels: entries.slice(chunkSize * 2),             phase: PHASE_STYLES[2], bgColor: '#F8F9FA' },
   ];
 
   const dirtyChannels = Object.keys(config).filter(ch => {
@@ -509,15 +570,15 @@ const ChannelConfigManager = () => {
   const hasActiveFilters = Boolean(searchTerm) || phaseFilter.length > 0 || statusFilter !== "all";
 
   return (
-    <Paper elevation={0} sx={{ mt: 3, borderRadius: 3, border: `1px solid ${BORDER}`, overflow: "hidden", fontFamily: DISPLAY_FONT }}>
+    <Paper elevation={0} sx={{ p: { xs: 2.5, md: 3.5 }, mt: 3, bgcolor: PANEL, position: 'relative', overflow: 'hidden' }}>
+      <Box sx={{ position: 'absolute', top: 0, left: 0, right: 0, height: 4, bgcolor: BRAND }} />
+
       {/* ── Kopfzeile ── */}
-      <Box sx={{ px: 3, py: 2.5, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 2, borderBottom: `1px solid ${BORDER}`, bgcolor: PANEL }}>
-        <Box display="flex" alignItems="center" gap={1.5}>
-          <Box sx={{ width: 40, height: 40, borderRadius: 2, bgcolor: SURFACE, display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <SettingsInputComponentIcon sx={{ color: INK }} />
-          </Box>
+      <Box display="flex" justifyContent="space-between" alignItems="center" mb={3} flexWrap="wrap" gap={1.5}>
+        <Box display="flex" alignItems="center" gap={1.4}>
+          <SectionHeaderIcon Icon={SettingsInputComponentIcon} />
           <Box>
-            <Typography sx={{ fontWeight: 700, fontSize: "1.15rem", color: INK, lineHeight: 1.2 }}>Kanal-Einstellungen</Typography>
+            <Typography variant="h5" sx={{ color: INK, lineHeight: 1.2 }}>Kanal-Einstellungen</Typography>
             <Typography variant="caption" sx={{ color: INK_MUTED }}>Schwellwerte &amp; Bezeichnungen je Messkanal · {entries.length} Kanäle</Typography>
           </Box>
         </Box>
@@ -525,33 +586,29 @@ const ChannelConfigManager = () => {
         <Box display="flex" alignItems="center" gap={1.5} flexWrap="wrap">
           {isDirty && (
             <Chip size="small" label={`${dirtyChannels.length} ungespeichert`} icon={<EditNoteIcon sx={{ fontSize: 16 }} />}
-              sx={{ bgcolor: WARNING_BG, color: WARNING, fontWeight: 600, "& .MuiChip-icon": { color: WARNING } }} />
+              sx={{ bgcolor: WARNING_BG, color: WARNING, "& .MuiChip-icon": { color: WARNING } }} />
           )}
           {isDirty && (
             <Button size="small" variant="text" onClick={discardChanges} startIcon={<RestartAltIcon />}
-              sx={{ textTransform: "none", color: INK_MUTED }}>
+              sx={{ borderRadius: 20, color: INK_MUTED }}>
               Verwerfen
             </Button>
           )}
           <Button variant="contained" onClick={saveConfig} disabled={saving || !isDirty} startIcon={<SaveIcon />}
-            sx={{
-              textTransform: "none", borderRadius: 2, fontWeight: 600, px: 2.5,
-              bgcolor: isDirty ? INK : BORDER, color: isDirty ? "#fff" : INK_MUTED,
-              "&:hover": { bgcolor: isDirty ? "#000" : BORDER },
-            }}>
-            {saving ? "Speichern…" : "Alle speichern"}
+            sx={{ bgcolor: SUCCESS, borderRadius: 20, boxShadow: 'none', '&:hover': { bgcolor: '#166B48', boxShadow: 'none' } }}>
+            {saving ? "Speichern..." : "Alle speichern"}
           </Button>
         </Box>
       </Box>
 
-      {message && <Alert severity={messageType === "success" ? "success" : "error"} sx={{ mx: 3, mt: 2 }}>{message}</Alert>}
+      {message && <Alert severity={messageType === "success" ? "success" : "error"} sx={{ mb: 2, borderRadius: 2 }}>{message}</Alert>}
 
       {/* ── Filterleiste ── */}
-      <Box sx={{ px: 3, py: 2, display: "flex", alignItems: "center", gap: 1.5, flexWrap: "wrap", bgcolor: SURFACE, borderBottom: `1px solid ${BORDER}` }}>
+      <Paper elevation={0} sx={{ p: 2, mb: 3, bgcolor: SURFACE, display: "flex", alignItems: "center", gap: 1.5, flexWrap: "wrap" }}>
         <TextField
           size="small" placeholder="Kanal oder Bezeichnung suchen…" value={searchTerm}
           onChange={e => setSearchTerm(e.target.value)}
-          sx={{ minWidth: 240, bgcolor: PANEL, borderRadius: 1.5, "& fieldset": { borderColor: BORDER } }}
+          sx={{ minWidth: 240, bgcolor: PANEL, borderRadius: 1 }}
           InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon sx={{ fontSize: 18, color: INK_MUTED }} /></InputAdornment> }}
         />
 
@@ -559,130 +616,116 @@ const ChannelConfigManager = () => {
 
         <Box display="flex" alignItems="center" gap={0.75}>
           <TuneIcon sx={{ fontSize: 18, color: INK_MUTED }} />
-          {PHASE_STYLES.map((p, idx) => (
-            <Chip
-              key={p.tag} label={p.tag} size="small" onClick={() => togglePhase(idx)}
-              icon={<Box sx={{ width: 8, height: 8, borderRadius: "50%", bgcolor: p.color, ml: "6px" }} />}
-              sx={{
-                fontWeight: 700, cursor: "pointer", border: `1.5px solid ${phaseFilter.length === 0 || phaseFilter.includes(idx) ? p.color : BORDER}`,
-                bgcolor: phaseFilter.length === 0 || phaseFilter.includes(idx) ? p.bg : "transparent",
-                color: phaseFilter.length === 0 || phaseFilter.includes(idx) ? p.color : INK_MUTED,
-                opacity: phaseFilter.length > 0 && !phaseFilter.includes(idx) ? 0.5 : 1,
-              }} />
-          ))}
+          {PHASE_STYLES.map((p, idx) => {
+            const active = phaseFilter.length === 0 || phaseFilter.includes(idx);
+            return (
+              <Chip
+                key={p.tag} label={p.tag} size="small" onClick={() => togglePhase(idx)}
+                icon={<Box sx={{ width: 8, height: 8, borderRadius: "50%", bgcolor: p.color, ml: "6px" }} />}
+                sx={{
+                  cursor: "pointer", border: `1px solid ${active ? BRAND : BORDER}`,
+                  bgcolor: active ? BRAND_BG : PANEL, color: active ? BRAND : INK_MUTED,
+                  opacity: active ? 1 : 0.6,
+                }} />
+            );
+          })}
         </Box>
 
         <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
 
-        <ToggleButtonGroup size="small" exclusive value={statusFilter} onChange={(e, v) => v && setStatusFilter(v)}>
-          <ToggleButton value="all" sx={{ textTransform: "none", px: 1.5, fontSize: "0.75rem" }}>Alle</ToggleButton>
-          <ToggleButton value="warn" sx={{ textTransform: "none", px: 1.5, fontSize: "0.75rem", color: WARNING }}>
+        <ToggleButtonGroup size="small" exclusive value={statusFilter} onChange={(e, v) => v && setStatusFilter(v)}
+          sx={{ bgcolor: PANEL, '& .MuiToggleButton-root': { borderColor: BORDER } }}>
+          <ToggleButton value="all" sx={{ textTransform: "none", px: 1.5, fontSize: "0.75rem", fontWeight: 700 }}>Alle</ToggleButton>
+          <ToggleButton value="warn" sx={{ textTransform: "none", px: 1.5, fontSize: "0.75rem", fontWeight: 700, color: WARNING }}>
             <WarningAmberIcon sx={{ fontSize: 15, mr: 0.5 }} /> {totalWarnCount}
           </ToggleButton>
-          <ToggleButton value="error" sx={{ textTransform: "none", px: 1.5, fontSize: "0.75rem", color: DANGER }}>
+          <ToggleButton value="error" sx={{ textTransform: "none", px: 1.5, fontSize: "0.75rem", fontWeight: 700, color: DANGER }}>
             <ErrorOutlineIcon sx={{ fontSize: 15, mr: 0.5 }} /> {totalErrorCount}
           </ToggleButton>
         </ToggleButtonGroup>
 
         {hasActiveFilters && (
-          <Button size="small" onClick={() => { setSearchTerm(""); setPhaseFilter([]); setStatusFilter("all"); }}
-            startIcon={<ClearAllIcon sx={{ fontSize: 16 }} />} sx={{ textTransform: "none", color: INK_MUTED, ml: "auto" }}>
+          <Button size="small" variant="contained" onClick={() => { setSearchTerm(""); setPhaseFilter([]); setStatusFilter("all"); }}
+            startIcon={<ClearAllIcon sx={{ fontSize: 16 }} />}
+            sx={{ ml: "auto", bgcolor: DANGER, borderRadius: 20, boxShadow: 'none', '&:hover': { bgcolor: '#A53023', boxShadow: 'none' } }}>
             Filter zurücksetzen
           </Button>
         )}
-      </Box>
+      </Paper>
 
       {/* ── Kanalgruppen ── */}
-      <Box sx={{ p: 3 }}>
-        {groups.map((group, groupIdx) => {
-          const visibleChannels = group.channels.filter(([ch, cfg]) => matchesFilters(ch, cfg, groupIdx));
-          if (visibleChannels.length === 0) return null;
-          return (
-            <Box key={groupIdx} sx={{ mb: 3, borderRadius: 2, border: `1px solid ${BORDER}`, overflow: "hidden" }}>
-              <Box sx={{ display: "flex", alignItems: "center", gap: 1, px: 2, py: 1.25, bgcolor: group.phase.bg, borderBottom: `1px solid ${BORDER}` }}>
-                <Box sx={{ width: 10, height: 10, borderRadius: "50%", bgcolor: group.phase.color, border: "2px solid #fff", boxShadow: `0 0 0 1px ${group.phase.color}` }} />
-                <Typography sx={{ fontWeight: 700, fontSize: "0.8rem", color: group.phase.color, letterSpacing: "0.4px" }}>
-                  {group.phase.name} · {group.phase.tag}
-                </Typography>
-                <Typography variant="caption" sx={{ color: INK_MUTED, ml: "auto" }}>{visibleChannels.length} Kanäle</Typography>
-              </Box>
-              <Box sx={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", minWidth: isMobile ? 560 : "auto" }}>
-                  <thead>
-                    <tr style={{ backgroundColor: SURFACE }}>
-                      <th style={{ padding: "10px 16px", textAlign: "left", fontSize: "0.72rem", letterSpacing: "0.5px", color: INK_MUTED, fontWeight: 700 }}>KANAL</th>
-                      <th style={{ padding: "10px 16px", textAlign: "left", fontSize: "0.72rem", letterSpacing: "0.5px", color: INK_MUTED, fontWeight: 700 }}>BEZEICHNUNG</th>
-                      <th style={{ padding: "10px 16px", textAlign: "left", fontSize: "0.72rem", letterSpacing: "0.5px", color: INK_MUTED, fontWeight: 700 }}>SCHWELLWERT (A)</th>
-                      <th style={{ padding: "10px 16px", textAlign: "left", fontSize: "0.72rem", letterSpacing: "0.5px", color: INK_MUTED, fontWeight: 700 }}>HÖCHSTWERT (A)</th>
-                      <th style={{ padding: "10px 16px", textAlign: "center", fontSize: "0.72rem", letterSpacing: "0.5px", color: INK_MUTED, fontWeight: 700 }}>STATUS</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {visibleChannels.map(([channel, cfg]) => {
-                      const status = CONFIG_STATUS[getConfigRowStatus(cfg)];
-                      const StatusIcon = status.Icon;
-                      const isRowDirty = dirtyChannels.includes(channel);
-                      return (
-                        <tr key={channel} style={{ borderBottom: `1px solid ${BORDER}`, backgroundColor: isRowDirty ? WARNING_BG : PANEL }}>
-                          <td style={{ padding: "10px 16px" }}>
-                            <Box display="flex" alignItems="center" gap={1}>
-                              <Box sx={{ width: 4, height: 20, borderRadius: 1, bgcolor: group.phase.color }} />
-                              <Typography sx={{ fontFamily: MONO_FONT, fontWeight: 700, fontSize: "0.85rem", color: INK }}>
-                                {formatChannelName(channel)}
-                              </Typography>
-                            </Box>
-                          </td>
-                          <td style={{ padding: "10px 16px" }}>
-                            <TextField size="small" value={cfg.label || ""} placeholder="Bezeichnung eingeben"
-                              onChange={e => handleChange(channel, "label", e.target.value)}
-                              fullWidth variant="outlined"
-                              sx={{ minWidth: 160, "& .MuiOutlinedInput-root": { bgcolor: PANEL, fontWeight: 600, fontSize: "0.85rem" } }} />
-                          </td>
-                          <td style={{ padding: "10px 16px" }}>
-                            <TextField type="number" size="small" value={cfg.schwellwert ?? 0}
-                              onChange={e => handleChange(channel, "schwellwert", parseFloat(e.target.value) || 0)}
-                              variant="outlined" inputProps={{ step: "0.1" }}
-                              sx={{ width: isMobile ? 90 : 110, "& .MuiOutlinedInput-root": { bgcolor: PANEL, fontFamily: MONO_FONT } }} />
-                          </td>
-                          <td style={{ padding: "10px 16px" }}>
-                            <TextField type="number" size="small" value={cfg.hoechstwert ?? 0}
-                              onChange={e => handleChange(channel, "hoechstwert", parseFloat(e.target.value) || 0)}
-                              variant="outlined" inputProps={{ step: "0.1" }}
-                              sx={{ width: isMobile ? 90 : 110, "& .MuiOutlinedInput-root": { bgcolor: PANEL, fontFamily: MONO_FONT } }} />
-                          </td>
-                          <td style={{ padding: "10px 16px", textAlign: "center" }}>
-                            <Tooltip title={status.label === "OK" ? "Werte plausibel" : status.label === "Prüfen" ? "Höchstwert fehlt oder ist 0" : "Schwellwert > Höchstwert"}>
-                              <Chip size="small" icon={<StatusIcon sx={{ fontSize: "15px !important", color: `${status.color} !important` }} />}
-                                label={status.label}
-                                sx={{ bgcolor: status.bg, color: status.color, fontWeight: 700, fontSize: "0.7rem" }} />
-                            </Tooltip>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </Box>
+      {groups.map((group, groupIdx) => {
+        const visibleChannels = group.channels.filter(([ch, cfg]) => matchesFilters(ch, cfg, groupIdx));
+        if (visibleChannels.length === 0) return null;
+        return (
+          <Box key={groupIdx} sx={{ mb: 3, p: 2, borderRadius: 2, backgroundColor: group.bgColor, border: `1px solid ${BORDER}`, overflowX: "auto" }}>
+            <Box display="flex" alignItems="center" gap={1} sx={{ mb: 1 }}>
+              <Box sx={{ width: 10, height: 10, borderRadius: "50%", bgcolor: group.phase.color }} />
+              <Typography variant="subtitle1" sx={{ color: INK, fontWeight: 700 }}>
+                {group.phase.name} · {group.phase.tag}
+              </Typography>
+              <Chip size="small" label={`${visibleChannels.length} Kanäle`} sx={{ ml: "auto", bgcolor: PANEL, color: INK_MUTED }} />
             </Box>
-          );
-        })}
-
-        {groups.every((group, groupIdx) => group.channels.filter(([ch, cfg]) => matchesFilters(ch, cfg, groupIdx)).length === 0) && (
-          <Box sx={{ py: 6, textAlign: "center" }}>
-            <SearchIcon sx={{ fontSize: 32, color: BORDER, mb: 1 }} />
-            <Typography sx={{ color: INK_MUTED }}>Keine Kanäle entsprechen den aktuellen Filtern.</Typography>
+            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: isMobile ? 560 : "auto" }}>
+              <thead>
+                <tr style={{ backgroundColor: "rgba(17,24,39,0.04)" }}>
+                  <th style={thStyle}>Kanal</th>
+                  <th style={thStyle}>Bezeichnung</th>
+                  <th style={thStyle}>Schwellwert (A)</th>
+                  <th style={thStyle}>Höchstwert (A)</th>
+                  <th style={{ ...thStyle, textAlign: "center" }}>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleChannels.map(([channel, cfg]) => {
+                  const status = CONFIG_STATUS[getConfigRowStatus(cfg)];
+                  const StatusIcon = status.Icon;
+                  const isRowDirty = dirtyChannels.includes(channel);
+                  return (
+                    <tr key={channel} style={{ borderBottom: `1px solid ${BORDER}`, backgroundColor: isRowDirty ? WARNING_BG : "transparent" }}>
+                      <td style={{ padding: "8px", fontWeight: 700, fontFamily: MONO_FONT }}><ChannelLabel channel={channel} /></td>
+                      <td style={{ padding: "8px" }}>
+                        <TextField size="small" value={cfg.label || ""} placeholder="Bezeichnung eingeben"
+                          onChange={e => handleChange(channel, "label", e.target.value)}
+                          fullWidth variant="outlined"
+                          InputProps={{ style: { color: INK, fontSize: "1rem", fontWeight: 600, backgroundColor: PANEL } }} />
+                      </td>
+                      <td style={{ padding: "8px" }}>
+                        <TextField type="number" size="small" value={cfg.schwellwert ?? 0}
+                          onChange={e => handleChange(channel, "schwellwert", parseFloat(e.target.value) || 0)}
+                          variant="outlined" inputProps={{ step: "0.1", style: { width: isMobile ? 80 : 100 } }}
+                          InputProps={{ style: { backgroundColor: PANEL, fontFamily: MONO_FONT } }} />
+                      </td>
+                      <td style={{ padding: "8px" }}>
+                        <TextField type="number" size="small" value={cfg.hoechstwert ?? 0}
+                          onChange={e => handleChange(channel, "hoechstwert", parseFloat(e.target.value) || 0)}
+                          variant="outlined" inputProps={{ step: "0.1", style: { width: isMobile ? 80 : 100 } }}
+                          InputProps={{ style: { backgroundColor: PANEL, fontFamily: MONO_FONT } }} />
+                      </td>
+                      <td style={{ padding: "8px", textAlign: "center" }}>
+                        <Tooltip title={status.label === "OK" ? "Werte plausibel" : status.label === "Prüfen" ? "Höchstwert fehlt oder ist 0" : "Schwellwert > Höchstwert"}>
+                          <Chip size="small" icon={<StatusIcon sx={{ fontSize: "15px !important", color: `${status.color} !important` }} />}
+                            label={status.label}
+                            sx={{ bgcolor: status.bg, color: status.color, fontSize: "0.7rem" }} />
+                        </Tooltip>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </Box>
-        )}
-      </Box>
+        );
+      })}
+
+      {groups.every((group, groupIdx) => group.channels.filter(([ch, cfg]) => matchesFilters(ch, cfg, groupIdx)).length === 0) && (
+        <Typography sx={{ color: INK_MUTED, py: 4, textAlign: "center" }}>Keine Kanäle entsprechen den aktuellen Filtern.</Typography>
+      )}
     </Paper>
   );
 };
 
 // ─── ENERGIE-MANAGER ──────────────────────────────────────────────────────────
-// Enterprise-Redesign: gleiche Phasenfarbcodierung wie in den Kanal-Einstellungen,
-// Such-/Phasenfilter mit Zähler-Chips, Zähler im LCD-Stil (Monospace) und
-// relative Zeitangaben für die letzte Änderung. Der Massen-Setzen-Vorgang läuft
-// als klar abgegrenzte "Stapelaktion"-Karte.
 const EnergyManager = () => {
   const [energyData, setEnergyData]                         = useState({});
   const [loading, setLoading]                               = useState(true);
@@ -691,14 +734,13 @@ const EnergyManager = () => {
   const [message, setMessage]                               = useState("");
   const [messageType, setMessageType]                       = useState("success");
   const [searchTerm, setSearchTerm]                         = useState("");
-  const [phaseFilter, setPhaseFilter]                       = useState([]); // [] = alle Phasen
+  const [phaseFilter, setPhaseFilter]                       = useState([]);
   const [, setTick]                                         = useState(0);
   const isMobile = useMediaQuery("(max-width:600px)");
 
   const loadEnergyData = async () => {
     try {
       const res = await axios.get(`${API_BASE_URL}/energy-values`);
-      // ✅ Décodage sûr des labels reçus (voir safeDecodeLabel plus haut).
       const decoded = Object.fromEntries(
         Object.entries(res.data).map(([ch, d]) => [ch, { ...d, label: safeDecodeLabel(d?.label) }])
       );
@@ -717,7 +759,6 @@ const EnergyManager = () => {
     return () => clearInterval(interval);
   }, []);
 
-  // Aktualisiert nur die Anzeige "vor X Min", ohne neu vom Server zu laden.
   useEffect(() => {
     const iv = setInterval(() => setTick(t => t + 1), 15000);
     return () => clearInterval(iv);
@@ -755,8 +796,6 @@ const EnergyManager = () => {
       } catch (err) { errorCount++; console.error(`Fehler bei ${channel}:`, err); }
     }
 
-    // ✅ CORRECTION 1 : Mettre à jour le state local IMMÉDIATEMENT
-    // sans attendre la relecture du Messkoffer
     setEnergyData(prev => {
       const updated = { ...prev };
       for (const channel of selectedEnergyChannels) {
@@ -777,31 +816,20 @@ const EnergyManager = () => {
 
     setLoading(false);
     setGlobalEnergyValue("");
-
-    // ✅ CORRECTION 2 : Relire depuis le serveur après 3s
-    // (le serveur attend déjà 2s avant de relire le Messkoffer)
     setTimeout(() => loadEnergyData(), 3000);
   };
 
   if (loading && Object.keys(energyData).length === 0)
-    return (
-      <Paper elevation={0} sx={{ p: 4, mt: 3, textAlign: "center", border: `1px dashed ${BORDER}`, borderRadius: 2 }}>
-        <Typography sx={{ color: INK_MUTED, fontFamily: DISPLAY_FONT }}>Energiedaten werden geladen…</Typography>
-      </Paper>
-    );
+    return <Typography sx={{ p: 3, color: INK_MUTED }}>Energiedaten werden geladen...</Typography>;
   if (!energyData || typeof energyData !== "object" || Object.keys(energyData).length === 0)
-    return (
-      <Paper elevation={0} sx={{ p: 4, mt: 3, textAlign: "center", border: `1px dashed ${BORDER}`, borderRadius: 2 }}>
-        <Typography sx={{ color: INK_MUTED, fontFamily: DISPLAY_FONT }}>Keine Daten verfügbar.</Typography>
-      </Paper>
-    );
+    return <Typography sx={{ p: 3, color: INK_MUTED }}>Keine Daten verfügbar...</Typography>;
 
-  const entries       = Object.entries(energyData);
-  const chunkSize      = Math.ceil(entries.length / 3) || 1;
-  const groups         = [
-    { channels: entries.slice(0, chunkSize),             phase: PHASE_STYLES[0] },
-    { channels: entries.slice(chunkSize, chunkSize * 2), phase: PHASE_STYLES[1] },
-    { channels: entries.slice(chunkSize * 2),            phase: PHASE_STYLES[2] },
+  const entries   = Object.entries(energyData);
+  const chunkSize = Math.ceil(entries.length / 3) || 1;
+  const groups    = [
+    { channels: entries.slice(0, chunkSize),             phase: PHASE_STYLES[0], bgColor: SURFACE   },
+    { channels: entries.slice(chunkSize, chunkSize * 2), phase: PHASE_STYLES[1], bgColor: '#EEF1F4' },
+    { channels: entries.slice(chunkSize * 2),            phase: PHASE_STYLES[2], bgColor: '#F8F9FA' },
   ];
 
   const matchesFilters = (channel, data_, groupIdx) => {
@@ -824,66 +852,68 @@ const EnergyManager = () => {
   const hasActiveFilters = Boolean(searchTerm) || phaseFilter.length > 0;
 
   return (
-    <Paper elevation={0} sx={{ mt: 3, borderRadius: 3, border: `1px solid ${BORDER}`, overflow: "hidden", fontFamily: DISPLAY_FONT }}>
+    <Paper elevation={0} sx={{ p: { xs: 2.5, md: 3.5 }, mt: 3, bgcolor: PANEL, position: 'relative', overflow: 'hidden' }}>
+      <Box sx={{ position: 'absolute', top: 0, left: 0, right: 0, height: 4, bgcolor: SUCCESS }} />
+
       {/* ── Kopfzeile ── */}
-      <Box sx={{ px: 3, py: 2.5, display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 2, borderBottom: `1px solid ${BORDER}`, bgcolor: PANEL }}>
-        <Box display="flex" alignItems="center" gap={1.5}>
-          <Box sx={{ width: 40, height: 40, borderRadius: 2, bgcolor: SURFACE, display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <BoltIcon sx={{ color: INK }} />
-          </Box>
+      <Box display="flex" justifyContent="space-between" alignItems="center" mb={3} flexWrap="wrap" gap={1.5}>
+        <Box display="flex" alignItems="center" gap={1.4}>
+          <SectionHeaderIcon Icon={BatteryChargingFullIcon} color={SUCCESS} bg={SUCCESS_BG} />
           <Box>
-            <Typography sx={{ fontWeight: 700, fontSize: "1.15rem", color: INK, lineHeight: 1.2 }}>Zählerstände</Typography>
+            <Typography variant="h5" sx={{ color: INK, lineHeight: 1.2 }}>Zählerstände</Typography>
             <Typography variant="caption" sx={{ color: INK_MUTED }}>Temporäre Energiezähler je Messkanal · {entries.length} Kanäle</Typography>
           </Box>
         </Box>
-        <Button variant="outlined" onClick={loadEnergyData} startIcon={<RefreshIcon />}
-          sx={{ textTransform: "none", borderRadius: 2, borderColor: BORDER, color: INK }}>
+        <Button variant="outlined" onClick={loadEnergyData} startIcon={<UpdateIcon />} sx={{ borderColor: BORDER, color: INK, borderRadius: 20 }}>
           Aktualisieren
         </Button>
       </Box>
 
-      {message && <Alert severity={messageType === "success" ? "success" : "error"} sx={{ mx: 3, mt: 2 }}>{message}</Alert>}
+      {message && <Alert severity={messageType === "success" ? "success" : "error"} sx={{ mb: 2, borderRadius: 2 }}>{message}</Alert>}
 
       {/* ── Filterleiste ── */}
-      <Box sx={{ px: 3, py: 2, display: "flex", alignItems: "center", gap: 1.5, flexWrap: "wrap", bgcolor: SURFACE, borderBottom: `1px solid ${BORDER}` }}>
+      <Paper elevation={0} sx={{ p: 2, mb: 2, bgcolor: SURFACE, display: "flex", alignItems: "center", gap: 1.5, flexWrap: "wrap" }}>
         <TextField
           size="small" placeholder="Kanal oder Bezeichnung suchen…" value={searchTerm}
           onChange={e => setSearchTerm(e.target.value)}
-          sx={{ minWidth: 240, bgcolor: PANEL, borderRadius: 1.5 }}
+          sx={{ minWidth: 240, bgcolor: PANEL, borderRadius: 1 }}
           InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon sx={{ fontSize: 18, color: INK_MUTED }} /></InputAdornment> }}
         />
         <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
         <Box display="flex" alignItems="center" gap={0.75}>
           <TuneIcon sx={{ fontSize: 18, color: INK_MUTED }} />
-          {PHASE_STYLES.map((p, idx) => (
-            <Chip
-              key={p.tag} label={p.tag} size="small" onClick={() => togglePhase(idx)}
-              icon={<Box sx={{ width: 8, height: 8, borderRadius: "50%", bgcolor: p.color, ml: "6px" }} />}
-              sx={{
-                fontWeight: 700, cursor: "pointer", border: `1.5px solid ${phaseFilter.length === 0 || phaseFilter.includes(idx) ? p.color : BORDER}`,
-                bgcolor: phaseFilter.length === 0 || phaseFilter.includes(idx) ? p.bg : "transparent",
-                color: phaseFilter.length === 0 || phaseFilter.includes(idx) ? p.color : INK_MUTED,
-                opacity: phaseFilter.length > 0 && !phaseFilter.includes(idx) ? 0.5 : 1,
-              }} />
-          ))}
+          {PHASE_STYLES.map((p, idx) => {
+            const active = phaseFilter.length === 0 || phaseFilter.includes(idx);
+            return (
+              <Chip
+                key={p.tag} label={p.tag} size="small" onClick={() => togglePhase(idx)}
+                icon={<Box sx={{ width: 8, height: 8, borderRadius: "50%", bgcolor: p.color, ml: "6px" }} />}
+                sx={{
+                  cursor: "pointer", border: `1px solid ${active ? BRAND : BORDER}`,
+                  bgcolor: active ? BRAND_BG : PANEL, color: active ? BRAND : INK_MUTED,
+                  opacity: active ? 1 : 0.6,
+                }} />
+            );
+          })}
         </Box>
         {hasActiveFilters && (
-          <Button size="small" onClick={() => { setSearchTerm(""); setPhaseFilter([]); }}
-            startIcon={<ClearAllIcon sx={{ fontSize: 16 }} />} sx={{ textTransform: "none", color: INK_MUTED, ml: "auto" }}>
+          <Button size="small" variant="contained" onClick={() => { setSearchTerm(""); setPhaseFilter([]); }}
+            startIcon={<ClearAllIcon sx={{ fontSize: 16 }} />}
+            sx={{ ml: "auto", bgcolor: DANGER, borderRadius: 20, boxShadow: 'none', '&:hover': { bgcolor: '#A53023', boxShadow: 'none' } }}>
             Filter zurücksetzen
           </Button>
         )}
-      </Box>
+      </Paper>
 
       {/* ── Stapelaktion: Wert setzen ── */}
-      <Box sx={{ mx: 3, mt: 3, p: 2.5, borderRadius: 2, border: `1px solid ${BORDER}`, bgcolor: SURFACE }}>
-        <Box display="flex" alignItems="center" gap={1} sx={{ mb: 1.5 }}>
+      <Paper elevation={0} sx={{ p: 2, mb: 3, bgcolor: SURFACE }}>
+        <Box display="flex" alignItems="center" gap={1} sx={{ mb: 2 }}>
           <LabelImportantOutlinedIcon sx={{ fontSize: 18, color: INK_MUTED }} />
-          <Typography sx={{ fontWeight: 700, fontSize: "0.85rem", color: INK }}>Stapelaktion — Zählerwert setzen</Typography>
+          <Typography variant="subtitle1" sx={{ color: INK, fontWeight: 700 }}>Zählerwert setzen</Typography>
           <Chip size="small" label={`${selectedCount} ausgewählt`}
-            sx={{ ml: "auto", bgcolor: selectedCount > 0 ? PRIMARY_COLOR : BORDER, color: selectedCount > 0 ? "#fff" : INK_MUTED, fontWeight: 600 }} />
+            sx={{ ml: "auto", bgcolor: selectedCount > 0 ? SUCCESS_BG : PANEL, color: selectedCount > 0 ? SUCCESS : INK_MUTED }} />
         </Box>
-        <Box display="flex" alignItems="center" gap={1.5} flexWrap="wrap">
+        <Box display="flex" alignItems="center" gap={2} flexWrap="wrap">
           <FormControlLabel
             sx={{ mr: 0 }}
             control={<Checkbox size="small" checked={allVisibleSelected} indeterminate={someVisibleSelected && !allVisibleSelected}
@@ -891,100 +921,85 @@ const EnergyManager = () => {
             label={<Typography variant="caption" sx={{ color: INK_MUTED }}>Alle sichtbaren</Typography>} />
           <TextField type="number" size="small" label="Wert (kWh)" value={globalEnergyValue}
             onChange={e => setGlobalEnergyValue(e.target.value)}
-            inputProps={{ step: "0.1" }} sx={{ width: 160, bgcolor: PANEL, "& input": { fontFamily: MONO_FONT } }} />
+            inputProps={{ step: "0.1", style: { width: 120, fontFamily: MONO_FONT } }} sx={{ flex: 1, bgcolor: PANEL, borderRadius: 1 }} />
           <Button variant="contained" onClick={sendGlobalEnergyValue} startIcon={<SendIcon />}
             disabled={loading || selectedEnergyChannels.length === 0 || globalEnergyValue === ""}
-            sx={{ textTransform: "none", borderRadius: 2, fontWeight: 600, bgcolor: INK, "&:hover": { bgcolor: "#000" } }}>
+            sx={{ bgcolor: SUCCESS, boxShadow: 'none', borderRadius: 20, '&:hover': { bgcolor: '#166B48', boxShadow: 'none' } }}>
             Absenden
           </Button>
-          <Typography variant="caption" sx={{ color: INK_MUTED }}>
-            Kanäle unten anhaken, Wert eingeben, absenden.
-          </Typography>
         </Box>
-      </Box>
+        <Typography variant="caption" sx={{ mt: 1, display: "block", color: INK_MUTED }}>
+          Wählen Sie Kanäle aus, geben Sie einen Wert ein und klicken Sie auf "Absenden".
+        </Typography>
+      </Paper>
 
       {/* ── Kanalgruppen ── */}
-      <Box sx={{ p: 3 }}>
-        {visibleGroups.map((group, groupIdx) => {
-          if (group.visible.length === 0) return null;
-          return (
-            <Box key={groupIdx} sx={{ mb: 3, borderRadius: 2, border: `1px solid ${BORDER}`, overflow: "hidden" }}>
-              <Box sx={{ display: "flex", alignItems: "center", gap: 1, px: 2, py: 1.25, bgcolor: group.phase.bg, borderBottom: `1px solid ${BORDER}` }}>
-                <Box sx={{ width: 10, height: 10, borderRadius: "50%", bgcolor: group.phase.color, border: "2px solid #fff", boxShadow: `0 0 0 1px ${group.phase.color}` }} />
-                <Typography sx={{ fontWeight: 700, fontSize: "0.8rem", color: group.phase.color, letterSpacing: "0.4px" }}>
-                  {group.phase.name} · {group.phase.tag}
-                </Typography>
-                <Typography variant="caption" sx={{ color: INK_MUTED, ml: "auto" }}>{group.visible.length} Kanäle</Typography>
-              </Box>
-              <Box sx={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", minWidth: isMobile ? 560 : "auto" }}>
-                  <thead>
-                    <tr style={{ backgroundColor: SURFACE }}>
-                      <th style={{ padding: "10px 12px", width: 40 }}></th>
-                      <th style={{ padding: "10px 16px", textAlign: "left", fontSize: "0.72rem", letterSpacing: "0.5px", color: INK_MUTED, fontWeight: 700 }}>KANAL</th>
-                      <th style={{ padding: "10px 16px", textAlign: "left", fontSize: "0.72rem", letterSpacing: "0.5px", color: INK_MUTED, fontWeight: 700 }}>BEZEICHNUNG</th>
-                      <th style={{ padding: "10px 16px", textAlign: "center", fontSize: "0.72rem", letterSpacing: "0.5px", color: INK_MUTED, fontWeight: 700 }}>ZÄHLERSTAND (KWH)</th>
-                      <th style={{ padding: "10px 16px", textAlign: "center", fontSize: "0.72rem", letterSpacing: "0.5px", color: INK_MUTED, fontWeight: 700 }}>LETZTE ÄNDERUNG</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {group.visible.map(([channel, data_]) => {
-                      const isSelected  = selectedEnergyChannels.includes(channel);
-                      const relative    = formatRelativeTime(data_?.updatedAt);
-                      return (
-                        <tr key={channel} style={{ borderBottom: `1px solid ${BORDER}`, backgroundColor: isSelected ? SUCCESS_BG : PANEL }}>
-                          <td style={{ padding: "10px 12px", textAlign: "center" }}>
-                            <Checkbox size="small" checked={isSelected} onChange={() => handleEnergyChannelToggle(channel)} />
-                          </td>
-                          <td style={{ padding: "10px 16px" }}>
-                            <Box display="flex" alignItems="center" gap={1}>
-                              <Box sx={{ width: 4, height: 20, borderRadius: 1, bgcolor: group.phase.color }} />
-                              <Typography sx={{ fontFamily: MONO_FONT, fontWeight: 700, fontSize: "0.85rem", color: INK }}>
-                                {formatChannelName(channel)}
-                              </Typography>
-                            </Box>
-                          </td>
-                          <td style={{ padding: "10px 16px" }}>
-                            <Typography variant="body2" sx={{ fontWeight: 600, color: INK }}>{data_?.label || formatChannelName(channel)}</Typography>
-                          </td>
-                          <td style={{ padding: "10px 16px", textAlign: "center" }}>
-                            <Box component="span" sx={{
-                              display: "inline-block", bgcolor: "#12181f", color: "#7CE2A6", fontFamily: MONO_FONT,
-                              fontWeight: 700, fontSize: "0.85rem", borderRadius: 1, px: 1.25, py: 0.5, letterSpacing: "0.5px",
-                            }}>
-                              {(data_?.temporary || 0).toFixed(2)} kWh
-                            </Box>
-                          </td>
-                          <td style={{ padding: "10px 16px", textAlign: "center" }}>
-                            {relative ? (
-                              <Box display="flex" alignItems="center" justifyContent="center" gap={0.5}>
-                                <ScheduleIcon sx={{ fontSize: 14, color: INK_MUTED }} />
-                                <Typography variant="caption" sx={{ color: INK_MUTED }}>{relative}</Typography>
-                              </Box>
-                            ) : <Typography variant="caption" sx={{ color: INK_MUTED }}>—</Typography>}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </Box>
+      {visibleGroups.map((group, groupIdx) => {
+        if (group.visible.length === 0) return null;
+        return (
+          <Box key={groupIdx} sx={{ mb: 3, p: 2, borderRadius: 2, backgroundColor: group.bgColor, border: `1px solid ${BORDER}`, overflowX: "auto" }}>
+            <Box display="flex" alignItems="center" gap={1} sx={{ mb: 1 }}>
+              <Box sx={{ width: 10, height: 10, borderRadius: "50%", bgcolor: group.phase.color }} />
+              <Typography variant="subtitle1" sx={{ color: INK, fontWeight: 700 }}>
+                {group.phase.name} · {group.phase.tag}
+              </Typography>
+              <Chip size="small" label={`${group.visible.length} Kanäle`} sx={{ ml: "auto", bgcolor: PANEL, color: INK_MUTED }} />
             </Box>
-          );
-        })}
-
-        {visibleKeys.length === 0 && (
-          <Box sx={{ py: 6, textAlign: "center" }}>
-            <SearchIcon sx={{ fontSize: 32, color: BORDER, mb: 1 }} />
-            <Typography sx={{ color: INK_MUTED }}>Keine Kanäle entsprechen den aktuellen Filtern.</Typography>
+            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: isMobile ? 560 : "auto" }}>
+              <thead>
+                <tr style={{ backgroundColor: "rgba(17,24,39,0.04)" }}>
+                  <th style={{ padding: "8px", width: 40 }}></th>
+                  <th style={{ ...thStyle, padding: "8px" }}>Kanal</th>
+                  <th style={{ ...thStyle, padding: "8px" }}>Bezeichnung</th>
+                  <th style={{ ...thStyle, padding: "8px", textAlign: "center" }}>Energie (kWh)</th>
+                  <th style={{ ...thStyle, padding: "8px", textAlign: "center" }}>Letzte Änderung</th>
+                </tr>
+              </thead>
+              <tbody>
+                {group.visible.map(([channel, data_]) => {
+                  const isSelected = selectedEnergyChannels.includes(channel);
+                  const relative   = formatRelativeTime(data_?.updatedAt);
+                  return (
+                    <tr key={channel} style={{ borderBottom: `1px solid ${BORDER}`, borderLeft: `4px solid ${group.phase.color}`, backgroundColor: isSelected ? SUCCESS_BG : "transparent" }}>
+                      <td style={{ padding: "8px", textAlign: "center" }}>
+                        <Checkbox size="small" checked={isSelected} onChange={() => handleEnergyChannelToggle(channel)} />
+                      </td>
+                      <td style={{ padding: "8px", fontWeight: 700, fontFamily: MONO_FONT, color: INK }}>
+                        <ChannelLabel channel={channel} />
+                      </td>
+                      <td style={{ padding: "8px" }}>
+                        <Typography variant="body2" sx={{ fontWeight: 600, color: INK }}>{data_?.label || <ChannelLabel channel={channel} />}</Typography>
+                      </td>
+                      <td style={{ padding: "8px", textAlign: "center" }}>
+                        <Typography variant="body2" sx={{ fontWeight: 700, color: ACCENT, fontFamily: MONO_FONT }}>
+                          {(data_?.temporary || 0).toFixed(2)} kWh
+                        </Typography>
+                      </td>
+                      <td style={{ padding: "8px", textAlign: "center" }}>
+                        {relative ? (
+                          <Box display="flex" alignItems="center" justifyContent="center" gap={0.5}>
+                            <ScheduleIcon sx={{ fontSize: 14, color: INK_MUTED }} />
+                            <Typography variant="caption" sx={{ color: INK_MUTED }}>{relative}</Typography>
+                          </Box>
+                        ) : <Typography variant="caption" sx={{ color: INK_MUTED }}>—</Typography>}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </Box>
-        )}
-      </Box>
+        );
+      })}
+
+      {visibleKeys.length === 0 && (
+        <Typography sx={{ color: INK_MUTED, py: 4, textAlign: "center" }}>Keine Kanäle entsprechen den aktuellen Filtern.</Typography>
+      )}
     </Paper>
   );
 };
 
-// ─── MAPPING METRIC OPTIONS (Strom / Wirkleistung / Spannung / Energie) ────────────────
+// ─── MAPPING METRIC OPTIONS ───────────────────────────────────────────────────
 const MAPPING_METRIC_OPTIONS = [
   { value: "Strom",        label: "Strom (A)",        icon: ElectricBoltIcon,        decimals: 3, unit: "A"   },
   { value: "Wirkleistung", label: "Wirkleistung (W)", icon: SpeedIcon,               decimals: 2, unit: "W"   },
@@ -999,8 +1014,10 @@ const MAPPING_METRIC_LABELS = {
 };
 const KANAL_LABELS = { "1": "L1", "2": "L2", "3": "L3", "4": "N" };
 const KANAL_OPTIONS = ["1", "2", "3", "4"];
+// Kanal 1 = Braun, Kanal 2 = Schwarz, Kanal 3 = Grau, Kanal 4 = Blau.
+const KANAL_COLORS = { "1": "#795548", "2": "#000000", "3": "#757575", "4": "#1976d2" };
 
-// ─── MAPPING DETAIL (historique d'un Sensor/Kanal, style GraphDetail) ───────
+// ─── MAPPING DETAIL ───────────────────────────────────────────────────────────
 const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
   const [selectedKanal, setSelectedKanal]   = useState(initialKanal);
   const [selectedMetric, setSelectedMetric] = useState("Strom");
@@ -1034,15 +1051,16 @@ const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
 
   return (
     <Box>
-      <Paper sx={{ p: 2, mb: 2, display: "flex", alignItems: "center", gap: 2, flexWrap: "wrap" }}>
-        <Button startIcon={<ArrowBackIcon />} onClick={onBack} variant="outlined" sx={{ textTransform: "none" }}>
+      <Paper elevation={0} sx={{ p: 2, mb: 2, display: "flex", alignItems: "center", gap: 2, flexWrap: "wrap", bgcolor: PANEL }}>
+        <Button startIcon={<ArrowBackIcon />} onClick={onBack} variant="outlined" sx={{ borderColor: BORDER, color: INK }}>
           Zurück zum Menü
         </Button>
-        <Typography variant="h5">{device}</Typography>
+        <Typography variant="h5" sx={{ color: INK }}>{device}</Typography>
 
         <Button variant="outlined" onClick={e => setKanalAnchorEl(e.currentTarget)}
-          endIcon={<span>▼</span>} sx={{ minWidth: 130, textTransform: "none" }}>
-          {KANAL_LABELS[selectedKanal] || selectedKanal} (Kanal {selectedKanal})
+          endIcon={<span>▼</span>} sx={{ minWidth: 130, borderColor: KANAL_COLORS[selectedKanal] || BORDER, color: INK }}>
+          <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: KANAL_COLORS[selectedKanal] || INK_MUTED, mr: 1 }} />
+          {KANAL_LABELS[selectedKanal] || selectedKanal}&nbsp;(Kanal {selectedKanal})
         </Button>
         <Menu anchorEl={kanalAnchorEl} open={Boolean(kanalAnchorEl)} onClose={() => setKanalAnchorEl(null)}
           anchorOrigin={{ vertical: "bottom", horizontal: "left" }} transformOrigin={{ vertical: "top", horizontal: "left" }}
@@ -1051,13 +1069,14 @@ const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
             <MenuItem key={k.kanal} onClick={e => { e.stopPropagation(); setSelectedKanal(k.kanal); }}
               selected={selectedKanal === k.kanal} sx={{ borderRadius: 1 }}>
               <Checkbox checked={selectedKanal === k.kanal} size="small" />
+              <Box sx={{ width: 8, height: 8, borderRadius: "50%", backgroundColor: KANAL_COLORS[k.kanal] || INK_MUTED, mr: 1 }} />
               <ListItemText primary={`${KANAL_LABELS[k.kanal] || k.kanal} (Kanal ${k.kanal})`} />
             </MenuItem>
           ))}
         </Menu>
 
         <Button variant="outlined" onClick={e => setMetricAnchorEl(e.currentTarget)}
-          endIcon={<span>▼</span>} sx={{ minWidth: 150, textTransform: "none" }}>
+          endIcon={<span>▼</span>} sx={{ minWidth: 150, borderColor: BORDER, color: INK }}>
           {MAPPING_METRIC_LABELS[selectedMetric]}
         </Button>
         <Menu anchorEl={metricAnchorEl} open={Boolean(metricAnchorEl)} onClose={() => setMetricAnchorEl(null)}
@@ -1073,7 +1092,7 @@ const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
         </Menu>
 
         <Button variant="outlined" onClick={e => setTimeAnchorEl(e.currentTarget)}
-          endIcon={<span>▼</span>} sx={{ minWidth: 150, textTransform: "none" }}>
+          endIcon={<span>▼</span>} sx={{ minWidth: 150, borderColor: BORDER, color: INK }}>
           {getTimeLabel()}
         </Button>
         <Menu anchorEl={timeAnchorEl} open={Boolean(timeAnchorEl)} onClose={() => setTimeAnchorEl(null)}
@@ -1088,39 +1107,43 @@ const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
           ))}
         </Menu>
 
-        <Typography variant="caption" style={{ color: "#666" }}>
-          {isMouseOverGraph ? "⏸ Pause (Maus über Grafik)" : " Aktualisierung alle 1 Sekunde"}
-        </Typography>
+        <Chip size="small" icon={<SyncIcon sx={{ fontSize: '13px !important' }} />}
+          label={isMouseOverGraph ? "Pause (Maus über Grafik)" : "Aktualisierung jede Sekunde"}
+          sx={{ bgcolor: SURFACE, color: INK_MUTED }} />
       </Paper>
 
-      {/* Résumé des valeurs actuelles */}
+      {/* Résumé des valeurs actuelles — lecteurs mono foncés */}
       <Box display="flex" gap={2} sx={{ mb: 2, flexWrap: "wrap" }}>
         {MAPPING_METRIC_OPTIONS.map(m => (
-          <Paper key={m.value} elevation={1} sx={{ flex: 1, minWidth: 140, p: 2, textAlign: "center" }}>
-            <Typography variant="caption" color="textSecondary">{m.label}</Typography>
-            <Typography variant="h5" fontWeight={600}>{formatValue(currentKanalData[m.value], m.decimals, m.unit)}</Typography>
+          <Paper key={m.value} elevation={0} sx={{ flex: 1, minWidth: 150, p: 0, textAlign: "center", overflow: 'hidden', bgcolor: PANEL }}>
+            <Typography variant="caption" sx={{ color: INK_MUTED, display: 'block', pt: 1.2 }}>{m.label}</Typography>
+            <Box sx={{ mx: 1.2, my: 1.2, bgcolor: READOUT_BG, borderRadius: '8px', py: 1.4 }}>
+              <Typography variant="h6" sx={{ fontFamily: MONO_FONT, fontWeight: 700, color: '#7CC7E8' }}>
+                {formatValue(currentKanalData[m.value], m.decimals, m.unit)}
+              </Typography>
+            </Box>
           </Paper>
         ))}
       </Box>
 
-      <Paper sx={{ p: 2, height: "55vh" }}
+      <Paper elevation={0} sx={{ p: 2, height: "55vh", bgcolor: PANEL }}
         onMouseEnter={() => setIsMouseOverGraph(true)} onMouseLeave={() => setIsMouseOverGraph(false)}>
         {historyData.length === 0 ? (
-          <Typography align="center" color="text.secondary">Keine historischen Daten.</Typography>
+          <Typography align="center" sx={{ color: INK_MUTED }}>Keine historischen Daten.</Typography>
         ) : (
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={historyData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
-              <CartesianGrid stroke="#ddd" strokeDasharray="5 5" />
+              <CartesianGrid stroke={BORDER} strokeDasharray="5 5" />
               <XAxis dataKey="time" tickFormatter={formatXAxis} angle={-30} textAnchor="end" height={60}
-                tick={{ fontSize: 11, fill: "#333" }} axisLine={{ stroke: "#888", strokeWidth: 1 }} />
-              <YAxis tick={{ fontSize: 11, fill: "#333" }} axisLine={{ stroke: "#888", strokeWidth: 1 }}
+                tick={{ fontSize: 11, fill: INK_MUTED }} axisLine={{ stroke: BORDER, strokeWidth: 1 }} />
+              <YAxis tick={{ fontSize: 11, fill: INK_MUTED }} axisLine={{ stroke: BORDER, strokeWidth: 1 }}
                 label={{ value: MAPPING_METRIC_LABELS[selectedMetric], angle: -90, position: "insideLeft",
-                  style: { textAnchor: "middle", fill: "#555", fontSize: 12 } }} />
+                  style: { textAnchor: "middle", fill: INK_MUTED, fontSize: 12 } }} />
               <RTooltip labelFormatter={t => new Date(t).toLocaleString()}
                 wrapperStyle={{ pointerEvents: "auto" }}
-                contentStyle={{ backgroundColor: "#fff", border: "1px solid #ccc", borderRadius: 6, fontSize: 12 }} />
+                contentStyle={{ backgroundColor: PANEL, border: `1px solid ${BORDER}`, borderRadius: 8, fontSize: 12 }} />
               <Legend wrapperStyle={{ fontSize: 12, paddingTop: 10 }} />
-              <Line type="monotone" dataKey={selectedMetric} stroke="#E67E22" strokeWidth={2.5}
+              <Line type="monotone" dataKey={selectedMetric} stroke={ACCENT} strokeWidth={2.5}
                 name={MAPPING_METRIC_LABELS[selectedMetric]} dot={false} isAnimationActive={false}
                 connectNulls activeDot={{ r: 6, stroke: "#fff", strokeWidth: 2 }} />
             </LineChart>
@@ -1131,18 +1154,19 @@ const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
   );
 };
 
-// ─── MAPPING MANAGER (boxes style Echtzeit + filtres + détail) ──────────────
+// ─── MAPPING MANAGER ──────────────────────────────────────────────────────────
 const MappingManager = () => {
   const [sensors, setSensors]                       = useState([]);
   const [loading, setLoading]                       = useState(true);
   const [refreshing, setRefreshing]                 = useState(false);
   const [message, setMessage]                       = useState("");
-  const [messageType, setMessageType]                = useState("success");
+  const [messageType, setMessageType]               = useState("success");
   const [selectedSensors, setSelectedSensors]       = useState([]);
   const [selectedMappingMetrics, setSelectedMappingMetrics] = useState([]);
   const [selectedKanaele, setSelectedKanaele]       = useState([]);
   const [kanalAnchorEl, setKanalAnchorEl]           = useState(null);
   const [detailDevice, setDetailDevice]             = useState(null);
+  const [detailKanal, setDetailKanal]               = useState(null);
   const isMobile = useMediaQuery("(max-width:600px)");
 
   const loadSensors = async (isManualRefresh = false) => {
@@ -1195,7 +1219,7 @@ const MappingManager = () => {
 
   const shouldShowSensor = device => selectedSensors.length === 0 || selectedSensors.includes(device);
   const shouldShowMetric = key    => selectedMappingMetrics.length === 0 || selectedMappingMetrics.includes(key);
-  const shouldShowKanal   = kanal  => selectedKanaele.length === 0 || selectedKanaele.includes(kanal);
+  const shouldShowKanal  = kanal  => selectedKanaele.length === 0 || selectedKanaele.includes(kanal);
 
   if (detailDevice) {
     const sensorObj = otherSensors.find(s => s.device === detailDevice);
@@ -1204,36 +1228,41 @@ const MappingManager = () => {
         <MappingDetail
           device={sensorObj.device}
           kanaele={sensorObj.kanaele}
-          initialKanal={sensorObj.kanaele[0]?.kanal}
-          onBack={() => setDetailDevice(null)}
+          initialKanal={detailKanal || sensorObj.kanaele[0]?.kanal}
+          onBack={() => { setDetailDevice(null); setDetailKanal(null); }}
         />
       );
     }
     setDetailDevice(null);
   }
 
-  if (loading) return <Typography sx={{ p: 3 }}>Sensoren werden erkannt...</Typography>;
+  if (loading) return <Typography sx={{ p: 3, color: INK_MUTED }}>Sensoren werden erkannt...</Typography>;
 
   const visibleSensors = otherSensors.filter(s => shouldShowSensor(s.device));
   const showNetzBox = Boolean(netzDevice) && (selectedSensors.length === 0) && shouldShowMetric("Spannung") && shouldShowKanal("1") && shouldShowKanal("2") && shouldShowKanal("3");
 
   return (
     <>
-      <Paper elevation={2} style={{ padding: "12px 20px", marginBottom: 20, borderRadius: 10, backgroundColor: "#fff" }}>
+      <Paper elevation={0} sx={{ p: "16px 20px", mb: "20px", bgcolor: PANEL, position: 'relative', overflow: 'hidden' }}>
+        <Box sx={{ position: 'absolute', top: 0, left: 0, right: 0, height: 4, bgcolor: BRAND }} />
         <Box display="flex" justifyContent="space-between" alignItems="center" flexWrap="wrap" gap={2}>
-          <Box display="flex" alignItems="center" gap={1.5}>
-            <DeviceHubIcon style={{ color: PRIMARY_COLOR, fontSize: "1.8rem" }} />
-            <Typography variant="h5" style={{ fontWeight: 600, color: "#333" }}>Mapping - Sensor-Übersicht</Typography>
+          <Box display="flex" alignItems="center" gap={1.4}>
+            <SectionHeaderIcon Icon={DeviceHubIcon} />
+            <Box>
+              <Typography variant="h5" sx={{ color: INK, lineHeight: 1.2 }}>Mapping – Sensor-Übersicht</Typography>
+              <Typography variant="caption" sx={{ color: INK_MUTED }}>Zuordnung Sensor → Kanal, live und historisch</Typography>
+            </Box>
           </Box>
           <Box display="flex" alignItems="center" gap={2} flexWrap="wrap">
             <FilterBar selectedChannels={selectedSensors} selectedMetrics={selectedMappingMetrics}
               onChannelChange={handleSensorChange} onSelectAllChannels={handleSelectAllSensors}
               onMetricChange={handleMetricChange} onSelectAllMetrics={handleSelectAllMetrics}
               onResetFilters={resetMappingFilters} hasActiveFilters={hasActiveFilters}
-              orderedChannels={allDeviceNames} metricOptions={MAPPING_METRIC_OPTIONS} mobileDrawer />
+              orderedChannels={allDeviceNames} metricOptions={MAPPING_METRIC_OPTIONS} mobileDrawer
+              itemsLabel="Sensoren" />
 
             <Button variant="outlined" onClick={e => { e.stopPropagation(); setKanalAnchorEl(e.currentTarget); }}
-              endIcon={<span>▼</span>} sx={{ minWidth: 150, borderRadius: 2, textTransform: "none" }}>
+              endIcon={<span>▼</span>} sx={{ minWidth: 150, borderRadius: 20, borderColor: BORDER, color: INK }}>
               {selKaCount === 0 || selKaCount === totKaCount ? "Alle Kanäle" : `${selKaCount} Kanäle`}
             </Button>
             <Popover open={Boolean(kanalAnchorEl)} anchorEl={kanalAnchorEl}
@@ -1248,97 +1277,107 @@ const MappingManager = () => {
                 {KANAL_OPTIONS.map(k => (
                   <FormControlLabel key={k}
                     control={<Checkbox checked={selectedKanaele.includes(k)} onChange={() => handleKanalToggle(k)} />}
-                    label={`${KANAL_LABELS[k] || k} (Kanal ${k})`} sx={{ display: "block" }} />
+                    label={
+                      <Box display="flex" alignItems="center" gap={1}>
+                        <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: KANAL_COLORS[k] }} />
+                        <span>{`${KANAL_LABELS[k] || k} (Kanal ${k})`}</span>
+                      </Box>
+                    } sx={{ display: "block" }} />
                 ))}
               </Box>
             </Popover>
 
             <Button variant="outlined" onClick={() => loadSensors(true)} disabled={refreshing} startIcon={<UpdateIcon />}
-              style={{ borderRadius: 20, textTransform: "none" }}>
+              sx={{ borderRadius: 20, borderColor: BORDER, color: INK }}>
               {refreshing ? "Aktualisieren..." : "Aktualisieren"}
             </Button>
           </Box>
         </Box>
       </Paper>
 
-      {message && <Alert severity={messageType === "success" ? "success" : "error"} sx={{ mb: 2 }}>{message}</Alert>}
+      {message && <Alert severity={messageType === "success" ? "success" : "error"} sx={{ mb: 2, borderRadius: 2 }}>{message}</Alert>}
 
       {showNetzBox && (
         <Box display="flex" gap={2} sx={{ mb: "25px", flexDirection: isMobile ? "column" : "row" }}>
           {[{ phase: "Phase 1", kanal: 1, label: "Spannung L1" },
             { phase: "Phase 2", kanal: 2, label: "Spannung L2" },
             { phase: "Phase 3", kanal: 3, label: "Spannung L3" }].map(({ phase, kanal, label }) => (
-            <Paper key={phase} elevation={2} style={{ flex: 1, padding: 15, backgroundColor: "#fff", borderRadius: 10, textAlign: "center" }}>
-              <Box display="flex" alignItems="center" justifyContent="center" gap={1}>
-                <VoltageSvgIcon style={{ color: PRIMARY_COLOR }} />
-                <Typography variant="subtitle1" fontWeight={600}>{phase}</Typography>
+            <Paper key={phase} elevation={0} sx={{ flex: 1, p: 0, bgcolor: PANEL, textAlign: "center", overflow: 'hidden' }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1, pt: 1.6 }}>
+                <VoltageSvgIcon sx={{ color: BRAND, fontSize: 18 }} />
+                <Typography variant="subtitle1" sx={{ fontWeight: 700, color: INK }}>{phase}</Typography>
               </Box>
-              <Typography variant="h3" fontWeight={600}>{formatValue(getNetzVoltage(kanal), 1, "V")}</Typography>
-              <Typography variant="caption">{label}</Typography>
+              <Box sx={{ mx: 2, my: 1.6, bgcolor: READOUT_BG, borderRadius: '10px', py: 2 }}>
+                <Typography sx={{ fontFamily: MONO_FONT, fontWeight: 700, fontSize: '1.8rem', color: '#7CC7E8' }}>
+                  {formatValue(getNetzVoltage(kanal), 1, "V")}
+                </Typography>
+              </Box>
+              <Typography variant="caption" sx={{ color: INK_MUTED, display: 'block', pb: 1.6 }}>{label}</Typography>
             </Paper>
           ))}
         </Box>
       )}
 
       {visibleSensors.length === 0 ? (
-        <Paper elevation={1} sx={{ p: 3 }}>
-          <Typography color="text.secondary">Keine aktiven Sensoren in InfluxDB gefunden.</Typography>
+        <Paper elevation={0} sx={{ p: 3, bgcolor: PANEL }}>
+          <Typography sx={{ color: INK_MUTED }}>Keine aktiven Sensoren in InfluxDB gefunden.</Typography>
         </Paper>
       ) : (
-        <div style={{ display: "flex", gap: 15, flexWrap: "wrap", flexDirection: isMobile ? "column" : "row" }}>
-          {visibleSensors.map(({ device, kanaele }) => {
-            const cardMetrics = MAPPING_METRIC_OPTIONS.filter(m => m.value !== "Spannung");
-            const visibleKanaele = kanaele.filter(k => shouldShowKanal(k.kanal));
-            const visibleMetricsExist = cardMetrics.some(m => shouldShowMetric(m.value));
-            if (!visibleMetricsExist || visibleKanaele.length === 0) return null;
-            return (
-              <Paper key={device} elevation={1} onClick={() => setDetailDevice(device)}
-                style={{ padding: 10, backgroundColor: "#fff", borderRadius: 8, cursor: "pointer",
-                  minWidth: isMobile ? "100%" : 260, flex: isMobile ? "1 1 100%" : "1 1 280px",
-                  transition: "transform 0.15s, box-shadow 0.15s" }}
-                onMouseEnter={e => { e.currentTarget.style.transform = "scale(1.01)"; e.currentTarget.style.boxShadow = "0 6px 12px rgba(0,0,0,0.1)"; }}
-                onMouseLeave={e => { e.currentTarget.style.transform = "scale(1)";    e.currentTarget.style.boxShadow = ""; }}>
-                <Box display="flex" alignItems="center" gap={1} sx={{ mb: 1 }}>
-                  <DeviceHubIcon style={{ color: PRIMARY_COLOR, fontSize: "0.9rem" }} />
-                  <Typography variant="subtitle2" style={{ fontWeight: 600, color: PRIMARY_COLOR, fontSize: "0.85rem" }}>{device}</Typography>
-                  <Typography variant="caption" style={{ color: "#888", flex: 1, textAlign: "right" }}>{visibleKanaele.length} Kanäle</Typography>
+        visibleSensors.map(({ device, kanaele }) => {
+          const cardMetrics = MAPPING_METRIC_OPTIONS.filter(m => m.value !== "Spannung");
+          const visibleKanaele = kanaele.filter(k => shouldShowKanal(k.kanal));
+          const visibleMetricsExist = cardMetrics.some(m => shouldShowMetric(m.value));
+          if (!visibleMetricsExist || visibleKanaele.length === 0) return null;
+          return (
+            <Box key={device} sx={{ mb: "28px" }}>
+              <Box display="flex" alignItems="center" gap={1} sx={{ mb: "10px" }}>
+                <Box sx={{ display: 'inline-flex', width: 26, height: 26, borderRadius: '50%', bgcolor: BRAND_BG, alignItems: 'center', justifyContent: 'center' }}>
+                  <DeviceHubIcon sx={{ color: BRAND, fontSize: "0.95rem" }} />
                 </Box>
-                <Divider style={{ marginBottom: 8, backgroundColor: "#e0e0e0" }} />
+                <Typography variant="h6" sx={{ color: INK }}>{device}</Typography>
+                <Chip size="small" label={`${visibleKanaele.length} Kanäle`} sx={{ bgcolor: SURFACE, color: INK_MUTED }} />
+              </Box>
+              <div style={{ display: "flex", gap: 15, flexWrap: "wrap", flexDirection: isMobile ? "column" : "row" }}>
                 {visibleKanaele.map(k => (
-                  <Box key={k.kanal} sx={{ mb: "8px" }}>
-                    <Typography variant="caption" style={{ color: "#666", fontWeight: 600 }}>
-                      {KANAL_LABELS[k.kanal] || k.kanal} (Kanal {k.kanal})
+                  <Paper key={`${device}_${k.kanal}`} elevation={0} onClick={() => { setDetailDevice(device); setDetailKanal(k.kanal); }}
+                    sx={{
+                      p: "12px 14px", bgcolor: PANEL, borderRadius: "12px", cursor: "pointer",
+                      minWidth: isMobile ? "100%" : 220, flex: isMobile ? "1 1 100%" : "1 1 240px",
+                      borderTop: `3px solid ${KANAL_COLORS[k.kanal] || BORDER}`,
+                      transition: "transform 0.15s ease, box-shadow 0.15s ease",
+                      "&:hover": { transform: "translateY(-3px)", boxShadow: "0 10px 24px rgba(17,24,39,0.08)" }
+                    }}>
+                    <Typography variant="caption" sx={{ color: INK_MUTED, display: "block", mb: 1 }}>Kanal {k.kanal}</Typography>
+                    <Typography variant="body1" sx={{ color: INK, fontWeight: 700, fontSize: "1rem", lineHeight: 1.2, mb: 1 }}>
+                      {KANAL_LABELS[k.kanal] || k.kanal}
                     </Typography>
+                    <Divider sx={{ mb: 1, bgcolor: BORDER }} />
                     {cardMetrics.map(m => {
                       if (!shouldShowMetric(m.value)) return null;
                       const Icon = m.icon;
                       return (
-                        <Box key={m.value} display="flex" justifyContent="space-between" alignItems="center" sx={{ mb: "4px", pl: 1 }}>
+                        <Box key={m.value} display="flex" justifyContent="space-between" alignItems="center" sx={{ mb: "4px" }}>
                           <Box display="flex" alignItems="center" gap={0.8}>
-                            <Icon style={{ color: "#888", fontSize: "0.8rem" }} />
-                            <Typography variant="caption" style={{ color: "#666" }}>{m.label.split(" ")[0]}:</Typography>
+                            <Icon sx={{ color: INK_MUTED, fontSize: "0.8rem" }} />
+                            <Typography variant="caption" sx={{ color: INK_MUTED }}>{m.label.split(" ")[0]}:</Typography>
                           </Box>
-                          <Box sx={{ bgcolor: "#e0e0e0", px: "8px", py: "2px", borderRadius: "4px", minWidth: 90, textAlign: "center" }}>
-                            <Typography variant="caption" style={{ fontWeight: 500, color: "#222" }}>
-                              {formatValue(k[m.value], m.decimals, m.unit)}
-                            </Typography>
-                          </Box>
+                          <ValueBadge>{formatValue(k[m.value], m.decimals, m.unit)}</ValueBadge>
                         </Box>
                       );
                     })}
-                  </Box>
+                  </Paper>
                 ))}
-              </Paper>
-            );
-          })}
-        </div>
+              </div>
+            </Box>
+          );
+        })
       )}
     </>
   );
 };
 
 // ─── HAUPTANWENDUNG ───────────────────────────────────────────────────────────
-function App() {
+function AppContent() {
   const [data, setData]                                     = useState({});
   const [loading, setLoading]                               = useState(true);
   const [selectedChannels, setSelectedChannels]             = useState([]);
@@ -1385,9 +1424,6 @@ function App() {
     const fetchData = async () => {
       try {
         const res = await axios.get(`${API_BASE_URL}/data`);
-        // ✅ Décodage sûr des labels affichés dans les cartes de canaux
-        // (voir safeDecodeLabel plus haut) — évite l'affichage de séquences
-        // percent-encodées comme "L%FCftung" au lieu de "Lüftung".
         const decoded = Object.fromEntries(
           Object.entries(res.data).map(([ch, d]) => [ch, { ...d, Label: safeDecodeLabel(d?.Label) }])
         );
@@ -1405,9 +1441,6 @@ function App() {
     if (view !== "graphDetail" || !selectedChannel || isMouseOverGraph) return;
     const update = async () => {
       try {
-        // ✅ CORRECTION : encodeURIComponent — les nouveaux noms de canaux
-        // contiennent un espace ("CH1 a"), il faut l'encoder dans l'URL,
-        // sinon la requête HTTP part malformée ou tronquée à l'espace.
         const res = await axios.get(`${API_BASE_URL}/history/${encodeURIComponent(selectedChannel)}?time=${timeRange}`);
         if (res.data?.data) setHistoryData(res.data.data);
       } catch (err) { console.error("Erreur historique:", err); }
@@ -1440,11 +1473,11 @@ function App() {
 
   // ── NavBar ──
   const NavBar = () => (
-    <Paper elevation={2} style={{ padding: isMobile ? "8px 12px" : "8px 20px", marginBottom: 20, borderRadius: 10, backgroundColor: "#fff" }}>
+    <Paper elevation={0} sx={{ p: isMobile ? "8px 12px" : "8px 20px", mb: "20px", bgcolor: PANEL }}>
       <Box display="flex" justifyContent="space-between" alignItems="center" flexWrap="wrap" gap={isMobile ? 1 : 0}>
         <Box display="flex" alignItems="center" gap={1}>
-          <DashboardIcon style={{ color: PRIMARY_COLOR }} />
-          <Typography variant="h6" style={{ fontWeight: 600, fontSize: isMobile ? "1rem" : "1.25rem" }}>Energy Monitor</Typography>
+          <DashboardIcon sx={{ color: BRAND }} />
+          <Typography variant="h6" sx={{ fontSize: isMobile ? "1rem" : "1.25rem", color: INK }}>Energy Monitor</Typography>
         </Box>
         <Box display="flex" gap={1}>
           {[
@@ -1453,11 +1486,15 @@ function App() {
           ].map(btn => (
             <Button key={btn.key} variant={view === btn.key ? "contained" : "outlined"} startIcon={btn.icon}
               onClick={() => setView(btn.key)}
-              style={{ borderRadius: 20, fontSize: isMobile ? "0.7rem" : undefined, padding: isMobile ? "4px 8px" : undefined, textTransform: "none" }}
+              sx={{
+                borderRadius: 20, fontSize: isMobile ? "0.7rem" : undefined, padding: isMobile ? "4px 8px" : undefined,
+                boxShadow: 'none', borderColor: BORDER, color: view === btn.key ? '#fff' : INK,
+                '&:hover': { boxShadow: 'none' }
+              }}
               size={isMobile ? "small" : "medium"}>{btn.label}</Button>
           ))}
           <Button variant="outlined" startIcon={<AccessTimeIcon />} onClick={() => window.open(STARTSEITE_URL, "_blank")}
-            style={{ borderRadius: 20, fontSize: isMobile ? "0.7rem" : undefined, padding: isMobile ? "4px 8px" : undefined, borderColor: "#e67e22", color: "#e67e22", textTransform: "none" }}
+            sx={{ borderRadius: 20, fontSize: isMobile ? "0.7rem" : undefined, padding: isMobile ? "4px 8px" : undefined, borderColor: ACCENT, color: ACCENT }}
             size={isMobile ? "small" : "medium"}>Startseite</Button>
         </Box>
       </Box>
@@ -1471,16 +1508,12 @@ function App() {
     return (
       <Box display="flex" justifyContent="space-between" alignItems="center" sx={{ mb: "6px" }}>
         <Box display="flex" alignItems="center" gap={0.8}>
-          <Icon style={{ color: "#888", fontSize: "0.85rem" }} />
-          <Typography variant="caption" style={{ color: "#666" }}>
+          <Icon sx={{ color: INK_MUTED, fontSize: "0.85rem" }} />
+          <Typography variant="caption" sx={{ color: INK_MUTED }}>
             {metric.value === "CosinusPhi" ? "Cosinus Phi:" : metric.label.split(" ")[0] + ":"}
           </Typography>
         </Box>
-        <Box sx={{ bgcolor: "#e0e0e0", px: "8px", py: "2px", borderRadius: "4px", minWidth: 100, textAlign: "center" }}>
-          <Typography variant="caption" style={{ fontWeight: 500, color: "#222" }}>
-            {formatValue(value, metric.decimals, metric.unit)}
-          </Typography>
-        </Box>
+        <ValueBadge>{formatValue(value, metric.decimals, metric.unit)}</ValueBadge>
       </Box>
     );
   };
@@ -1492,13 +1525,13 @@ function App() {
     const hasVisible  = METRIC_OPTIONS.some(m => useTrendFilter ? shouldShowTrendMetric(m.value) : shouldShowMetric(m.value));
     if (!hasVisible) return null;
     return (
-      <Paper elevation={1} style={{ padding: 10, backgroundColor: "#fff", borderRadius: 8, marginBottom: 10 }}>
+      <Paper elevation={0} sx={{ p: "10px 12px", bgcolor: PANEL, borderRadius: "10px", mb: "10px" }}>
         <Box display="flex" alignItems="center" gap={1} sx={{ mb: 1 }}>
-          <DeviceHubIcon style={{ color: PRIMARY_COLOR, fontSize: "0.9rem" }} />
-          <Typography variant="subtitle2" style={{ fontWeight: 600, color: PRIMARY_COLOR, fontSize: "0.85rem" }}>{formatChannelName(channel)}</Typography>
-          <Typography variant="caption" style={{ color: "#000", fontSize: "0.9rem", fontWeight: 600, flex: 1, textAlign: "right" }}>{label}</Typography>
+          <DeviceHubIcon sx={{ color: BRAND, fontSize: "0.9rem" }} />
+          <Typography variant="subtitle2" sx={{ fontWeight: 700, fontSize: "0.85rem" }}><ChannelLabel channel={channel} /></Typography>
+          <Typography variant="caption" sx={{ color: INK, fontSize: "0.9rem", fontWeight: 700, flex: 1, textAlign: "right" }}>{label}</Typography>
         </Box>
-        <Divider style={{ marginBottom: 8, backgroundColor: "#e0e0e0" }} />
+        <Divider sx={{ mb: 1, bgcolor: BORDER }} />
         {METRIC_OPTIONS.map(m => <ValueRow key={m.value} metric={m} value={channelData[m.value]} useTrendFilter={useTrendFilter} />)}
       </Paper>
     );
@@ -1509,10 +1542,12 @@ function App() {
     const filtered = channels.filter(ch => useTrendFilter ? shouldShowTrendChannel(ch) : shouldShowChannel(ch));
     if (filtered.length === 0) return null;
     return (
-      <Paper elevation={2} style={{ flex: 1, padding: 12, background: "#fff", borderRadius: 10 }}>
-        <Box display="flex" alignItems="center" justifyContent="center" gap={1} sx={{ mb: "12px" }}>
-          <Icon style={{ color: PRIMARY_COLOR, fontSize: "1.1rem" }} />
-          <Typography variant="subtitle2" style={{ fontWeight: 600, color: PRIMARY_COLOR, letterSpacing: "0.5px" }}>{title}</Typography>
+      <Paper elevation={0} sx={{ flex: 1, p: "16px", bgcolor: PANEL, borderRadius: "14px" }}>
+        <Box display="flex" alignItems="center" justifyContent="center" gap={1} sx={{ mb: "14px" }}>
+          <Box sx={{ display: 'inline-flex', width: 26, height: 26, borderRadius: '50%', bgcolor: BRAND_BG, alignItems: 'center', justifyContent: 'center' }}>
+            <Icon sx={{ color: BRAND, fontSize: "0.95rem" }} />
+          </Box>
+          <Typography variant="subtitle2" sx={{ fontWeight: 700, color: INK, letterSpacing: "0.3px" }}>{title}</Typography>
         </Box>
         {filtered.map(ch => <ChannelCard key={ch} channel={ch} useTrendFilter={useTrendFilter} />)}
       </Paper>
@@ -1529,11 +1564,12 @@ function App() {
 
     return (
       <>
-        <Paper elevation={2} style={{ padding: "12px 20px", marginBottom: 20, borderRadius: 10, backgroundColor: "#fff" }}>
+        <Paper elevation={0} sx={{ p: "16px 20px", mb: "20px", bgcolor: PANEL, position: 'relative', overflow: 'hidden' }}>
+          <Box sx={{ position: 'absolute', top: 0, left: 0, right: 0, height: 4, bgcolor: BRAND }} />
           <Box display="flex" justifyContent="space-between" alignItems="center" flexWrap="wrap" gap={2}>
-            <Box display="flex" alignItems="center" gap={1.5}>
-              <DashboardIcon style={{ color: PRIMARY_COLOR, fontSize: "1.8rem" }} />
-              <Typography variant="h5" style={{ fontWeight: 600, color: "#333" }}>Live Daten</Typography>
+            <Box display="flex" alignItems="center" gap={1.4}>
+              <SectionHeaderIcon Icon={DashboardIcon} />
+              <Typography variant="h5" sx={{ color: INK }}>Live Daten</Typography>
             </Box>
             <FilterBar selectedChannels={selectedChannels} selectedMetrics={selectedMetrics}
               onChannelChange={handleChannelChange} onSelectAllChannels={handleSelectAllChannels}
@@ -1541,24 +1577,28 @@ function App() {
               onResetFilters={resetFilters} hasActiveFilters={hasActiveFilters}
               orderedChannels={orderedChannels} metricOptions={METRIC_OPTIONS} mobileDrawer />
             <Button variant="outlined" href={grafanaUrl} target="_blank" startIcon={<TrendingUpIcon />}
-              style={{ borderColor: PRIMARY_COLOR, color: PRIMARY_COLOR, borderRadius: 20, textTransform: "none" }}>
+              sx={{ borderColor: BRAND, color: BRAND, borderRadius: 20 }}>
               Grafana Dashboard
             </Button>
           </Box>
         </Paper>
 
-        {/* Spannungen */}
+        {/* Spannungen — lecteurs mono foncés */}
         <Box display="flex" gap={2} sx={{ mb: "25px", flexDirection: isMobile ? "column" : "row" }}>
           {[{ phase: "Phase 1", voltage: voltages.L1, label: "Spannung L1" },
             { phase: "Phase 2", voltage: voltages.L2, label: "Spannung L2" },
             { phase: "Phase 3", voltage: voltages.L3, label: "Spannung L3" }].map(({ phase, voltage, label }) => (
-            <Paper key={phase} elevation={2} style={{ flex: 1, padding: 15, backgroundColor: "#fff", borderRadius: 10, textAlign: "center" }}>
-              <Box display="flex" alignItems="center" justifyContent="center" gap={1}>
-                <VoltageSvgIcon style={{ color: PRIMARY_COLOR }} />
-                <Typography variant="subtitle1" fontWeight={600}>{phase}</Typography>
+            <Paper key={phase} elevation={0} sx={{ flex: 1, p: 0, bgcolor: PANEL, textAlign: "center", overflow: 'hidden' }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1, pt: 1.6 }}>
+                <VoltageSvgIcon sx={{ color: BRAND, fontSize: 18 }} />
+                <Typography variant="subtitle1" sx={{ fontWeight: 700, color: INK }}>{phase}</Typography>
               </Box>
-              <Typography variant="h3" fontWeight={600}>{formatValue(voltage, 1, "V")}</Typography>
-              <Typography variant="caption">{label}</Typography>
+              <Box sx={{ mx: 2, my: 1.6, bgcolor: READOUT_BG, borderRadius: '10px', py: 2 }}>
+                <Typography sx={{ fontFamily: MONO_FONT, fontWeight: 700, fontSize: '1.8rem', color: '#7CC7E8' }}>
+                  {formatValue(voltage, 1, "V")}
+                </Typography>
+              </Box>
+              <Typography variant="caption" sx={{ color: INK_MUTED, display: 'block', pb: 1.6 }}>{label}</Typography>
             </Paper>
           ))}
         </Box>
@@ -1586,15 +1626,18 @@ function App() {
       if (!shouldShowTrendChannel(channel)) return null;
       return (
         <Paper elevation={0} onClick={() => handleOpenGraph(channel)}
-          style={{ padding: "24px 12px 20px", backgroundColor: "#fff", borderRadius: 16, marginBottom: 16,
-            cursor: "pointer", textAlign: "center", border: "1px solid #000",
-            transition: "transform 0.2s, box-shadow 0.2s", boxShadow: "0 2px 4px rgba(0,0,0,0.05)" }}
-          onMouseEnter={e => { e.currentTarget.style.transform = "scale(1.01)"; e.currentTarget.style.boxShadow = "0 6px 12px rgba(0,0,0,0.1)"; }}
-          onMouseLeave={e => { e.currentTarget.style.transform = "scale(1)";    e.currentTarget.style.boxShadow = "0 2px 4px rgba(0,0,0,0.05)"; }}>
+          sx={{
+            p: "24px 12px 20px", bgcolor: PANEL, borderRadius: "16px", mb: "16px",
+            cursor: "pointer", textAlign: "center",
+            transition: "transform 0.15s ease, box-shadow 0.15s ease",
+            "&:hover": { transform: "translateY(-3px)", boxShadow: "0 10px 24px rgba(17,24,39,0.08)" }
+          }}>
           <Box display="flex" flexDirection="column" alignItems="center" gap={1.5}>
-            <ElectricalServicesIcon style={{ color: PRIMARY_COLOR, fontSize: "3rem" }} />
-            <Typography variant="h6" style={{ fontWeight: 600, color: PRIMARY_COLOR, fontSize: "1rem" }}>{formatChannelName(channel)}</Typography>
-            <Typography variant="caption" style={{ color: "#000", fontSize: "0.85rem", fontWeight: 600 }}>{label}</Typography>
+            <Box sx={{ display: 'inline-flex', width: 56, height: 56, borderRadius: '50%', bgcolor: BRAND_BG, alignItems: 'center', justifyContent: 'center' }}>
+              <ElectricalServicesIcon sx={{ color: BRAND, fontSize: "1.7rem" }} />
+            </Box>
+            <Typography variant="h6" sx={{ fontWeight: 700, fontSize: "1rem" }}><ChannelLabel channel={channel} /></Typography>
+            <Typography variant="caption" sx={{ color: INK_MUTED, fontSize: "0.85rem", fontWeight: 600 }}>{label}</Typography>
           </Box>
         </Paper>
       );
@@ -1604,10 +1647,10 @@ function App() {
       const visible = channels.filter(ch => shouldShowTrendChannel(ch));
       if (visible.length === 0) return null;
       return (
-        <Paper elevation={0} style={{ flex: 1, padding: "16px 8px", background: "#fff", borderRadius: 12, border: "1px solid #e0e0e0" }}>
+        <Paper elevation={0} sx={{ flex: 1, p: "16px 8px", bgcolor: PANEL, borderRadius: "12px" }}>
           <Box display="flex" alignItems="center" justifyContent="center" gap={1} sx={{ mb: "16px" }}>
-            <ViewModuleIcon style={{ color: PRIMARY_COLOR, fontSize: "1.2rem" }} />
-            <Typography variant="subtitle2" style={{ fontWeight: 700, color: PRIMARY_COLOR, letterSpacing: "1px", fontSize: "0.75rem" }}>{title}</Typography>
+            <ViewModuleIcon sx={{ color: BRAND, fontSize: "1.2rem" }} />
+            <Typography variant="subtitle2" sx={{ fontWeight: 700, color: INK, letterSpacing: "1px", fontSize: "0.75rem" }}>{title}</Typography>
           </Box>
           {visible.map(ch => <ChannelGraphCard key={ch} channel={ch} />)}
         </Paper>
@@ -1616,11 +1659,12 @@ function App() {
 
     return (
       <>
-        <Paper elevation={2} style={{ padding: "12px 20px", marginBottom: 20, borderRadius: 10, backgroundColor: "#fff" }}>
+        <Paper elevation={0} sx={{ p: "16px 20px", mb: "20px", bgcolor: PANEL, position: 'relative', overflow: 'hidden' }}>
+          <Box sx={{ position: 'absolute', top: 0, left: 0, right: 0, height: 4, bgcolor: ACCENT }} />
           <Box display="flex" justifyContent="space-between" alignItems="center" flexWrap="wrap" gap={2}>
-            <Box display="flex" alignItems="center" gap={1.5}>
-              <ShowChartIcon style={{ color: PRIMARY_COLOR, fontSize: "1.8rem" }} />
-              <Typography variant="h5" style={{ fontWeight: 600, color: "#333" }}>Trends - Kanalübersicht</Typography>
+            <Box display="flex" alignItems="center" gap={1.4}>
+              <SectionHeaderIcon Icon={ShowChartIcon} color={ACCENT} bg={ACCENT_BG} />
+              <Typography variant="h5" sx={{ color: INK }}>Trends – Kanalübersicht</Typography>
             </Box>
             <FilterBar selectedChannels={trendSelectedChannels} selectedMetrics={trendSelectedMetrics}
               onChannelChange={handleTrendChannelChange} onSelectAllChannels={handleTrendSelectAllChannels}
@@ -1640,14 +1684,14 @@ function App() {
 
   if (loading || orderedChannels.length === 0) {
     return (
-      <Box display="flex" justifyContent="center" alignItems="center" height="100vh" bgcolor="#f5f5f5">
-        <Typography variant="h5" color={PRIMARY_COLOR}>Laden...</Typography>
+      <Box display="flex" justifyContent="center" alignItems="center" height="100vh" sx={{ bgcolor: SURFACE }}>
+        <Typography variant="h5" sx={{ color: BRAND }}>Laden...</Typography>
       </Box>
     );
   }
 
   return (
-    <div style={{ padding: "15px 40px", backgroundColor: "#f0f0f0", minHeight: "100vh" }}>
+    <div style={{ padding: "15px 40px", backgroundColor: SURFACE, minHeight: "100vh", fontFamily: DISPLAY_FONT }}>
       <NavBar />
       {view === "dashboard"   && <DashboardView />}
       {view === "graphMenu"   && <GraphMenu />}
@@ -1668,6 +1712,14 @@ function App() {
       {view === "energy"  && <EnergyManager />}
       {view === "mapping" && <MappingManager />}
     </div>
+  );
+}
+
+function App() {
+  return (
+    <ThemeProvider theme={theme}>
+      <AppContent />
+    </ThemeProvider>
   );
 }
 
