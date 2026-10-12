@@ -10,8 +10,7 @@ import { ThemeProvider, createTheme } from "@mui/material/styles";
 import {
   Paper, Typography, Box, Button, Divider,
   MenuItem, Checkbox, ListItemText, TextField, Alert,
-  useMediaQuery, Drawer, Badge, Popover, FormControlLabel, Menu,
-  InputAdornment, Chip, Tooltip, ToggleButton, ToggleButtonGroup
+  useMediaQuery, Drawer, Badge, Popover, FormControlLabel, Menu, Chip
 } from "@mui/material";
 import TrendingUpIcon from "@mui/icons-material/TrendingUp";
 import DashboardIcon from "@mui/icons-material/Dashboard";
@@ -33,17 +32,6 @@ import FilterListIcon from "@mui/icons-material/FilterList";
 import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import UpdateIcon from "@mui/icons-material/Update";
 import SyncIcon from "@mui/icons-material/Sync";
-import SearchIcon from "@mui/icons-material/Search";
-import TuneIcon from "@mui/icons-material/Tune";
-import CheckCircleIcon from "@mui/icons-material/CheckCircle";
-import WarningAmberIcon from "@mui/icons-material/WarningAmber";
-import ErrorOutlineIcon from "@mui/icons-material/ErrorOutline";
-import RestartAltIcon from "@mui/icons-material/RestartAlt";
-import SettingsInputComponentIcon from "@mui/icons-material/SettingsInputComponent";
-import EditNoteIcon from "@mui/icons-material/EditNote";
-import ScheduleIcon from "@mui/icons-material/Schedule";
-import SendIcon from "@mui/icons-material/Send";
-import LabelImportantOutlinedIcon from "@mui/icons-material/LabelImportantOutlined";
 import {
   LineChart, Line, XAxis, YAxis, Tooltip as RTooltip, Legend, CartesianGrid, ResponsiveContainer
 } from "recharts";
@@ -57,7 +45,6 @@ const BORDER     = '#E3E6EB';
 const SUCCESS    = '#1E8A5D';
 const SUCCESS_BG = '#E7F5EE';
 const DANGER     = '#C0392B';
-const DANGER_BG  = '#FBEAE8';
 const WARNING    = '#B7791F';
 const WARNING_BG = '#FBF1DE';
 const BRAND      = '#0a5e8c';
@@ -155,13 +142,6 @@ const DEFAULT_CHANNELS = [
   "CH3 m", "CH3 n", "CH3 o", "CH3 p", "CH3 q", "CH3 r"
 ];
 
-// Phasenfarben nach IEC-Aderfarbe (L1 braun, L2 schwarz, L3 grau)
-const PHASE_STYLES = [
-  { tag: "L1", color: "#7A5230", bg: "#F7EFE6", name: "Phase 1" },
-  { tag: "L2", color: "#22262B", bg: "#ECEDEF", name: "Phase 2" },
-  { tag: "L3", color: "#525C68", bg: "#EEF1F3", name: "Phase 3" },
-];
-
 const METRIC_LABELS = {
   Strom:        "Strom (A)",
   Wirkleistung: "Wirkleistung (W)",
@@ -193,21 +173,6 @@ const formatValue = (value, decimals = 3, unit = "") => {
   const num = (value === undefined || value === null) ? 0 : parseFloat(value);
   const safeNum = isNaN(num) ? 0 : num;
   return `${safeNum.toFixed(decimals)}${unit ? " " + unit : ""}`;
-};
-
-const formatRelativeTime = (iso) => {
-  if (!iso) return null;
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return null;
-  const diffSec = Math.round((Date.now() - d.getTime()) / 1000);
-  if (diffSec < 5) return "gerade eben";
-  if (diffSec < 60) return `vor ${diffSec} s`;
-  const diffMin = Math.round(diffSec / 60);
-  if (diffMin < 60) return `vor ${diffMin} Min`;
-  const diffH = Math.round(diffMin / 60);
-  if (diffH < 24) return `vor ${diffH} Std`;
-  const diffD = Math.round(diffH / 24);
-  return `vor ${diffD} T`;
 };
 
 // ─── Petit badge de valeur (chiffre en mono, cohérent avec le portail) ──────
@@ -462,32 +427,14 @@ const GraphDetail = ({ selectedChannel, historyData, isMouseOverGraph, setIsMous
 };
 
 // ─── KANAL-KONFIGURATION ──────────────────────────────────────────────────────
-const CONFIG_STATUS = {
-  ok:      { label: "OK",             color: SUCCESS, bg: SUCCESS_BG, Icon: CheckCircleIcon },
-  warn:    { label: "Prüfen",         color: WARNING, bg: WARNING_BG, Icon: WarningAmberIcon },
-  error:   { label: "Ungültig",       color: DANGER,  bg: DANGER_BG,  Icon: ErrorOutlineIcon },
-};
-
-const getConfigRowStatus = (cfg) => {
-  const schwell = parseFloat(cfg?.schwellwert);
-  const hoch    = parseFloat(cfg?.hoechstwert);
-  if (isNaN(schwell) || isNaN(hoch) || hoch <= 0) return "warn";
-  if (schwell > hoch) return "error";
-  return "ok";
-};
-
-const thStyle = { padding: "12px", textAlign: "left", color: INK_MUTED, fontSize: '0.8rem' };
-
+// ✅ Même habillage que le portail mE2go : tableau par groupe de 6 canaux,
+// fond de groupe nuancé, bordure fine, bouton "Alle speichern" vert en pilule.
 const ChannelConfigManager = () => {
   const [config, setConfig]           = useState({});
-  const [savedConfig, setSavedConfig] = useState({});
   const [loading, setLoading]         = useState(true);
   const [saving, setSaving]           = useState(false);
   const [message, setMessage]         = useState("");
   const [messageType, setMessageType] = useState("success");
-  const [searchTerm, setSearchTerm]   = useState("");
-  const [phaseFilter, setPhaseFilter] = useState([]);
-  const [statusFilter, setStatusFilter] = useState("all");
   const isMobile = useMediaQuery("(max-width:600px)");
 
   const loadConfig = async () => {
@@ -496,11 +443,11 @@ const ChannelConfigManager = () => {
       const timeoutId  = setTimeout(() => controller.abort(), 5000);
       const res        = await axios.get(`${API_BASE_URL}/config`, { signal: controller.signal });
       clearTimeout(timeoutId);
+      // ✅ Décodage sûr des labels (voir safeDecodeLabel plus haut)
       const decoded = Object.fromEntries(
         Object.entries(res.data).map(([ch, cfg]) => [ch, { ...cfg, label: safeDecodeLabel(cfg?.label) }])
       );
       setConfig(decoded);
-      setSavedConfig(decoded);
     } catch (err) {
       setMessageType("error");
       setMessage(err.name === "AbortError"
@@ -530,202 +477,82 @@ const ChannelConfigManager = () => {
     } finally { setSaving(false); }
   };
 
-  const discardChanges = () => setConfig(savedConfig);
-
-  const togglePhase = (idx) =>
-    setPhaseFilter(prev => prev.includes(idx) ? prev.filter(p => p !== idx) : [...prev, idx]);
-
   if (loading) return <Typography sx={{ color: INK_MUTED }}>Konfiguration wird geladen...</Typography>;
 
   const entries = Object.entries(config).filter(([key]) => !key.startsWith("L"));
-  const chunkSize = Math.ceil(entries.length / 3) || 1;
   const groups  = [
-    { channels: entries.slice(0, chunkSize),              phase: PHASE_STYLES[0], bgColor: SURFACE   },
-    { channels: entries.slice(chunkSize, chunkSize * 2),  phase: PHASE_STYLES[1], bgColor: '#EEF1F4' },
-    { channels: entries.slice(chunkSize * 2),             phase: PHASE_STYLES[2], bgColor: '#F8F9FA' },
+    { channels: entries.slice(0, 6),   bgColor: SURFACE,   title: "Kanäle A-F" },
+    { channels: entries.slice(6, 12),  bgColor: '#EEF1F4', title: "Kanäle G-L" },
+    { channels: entries.slice(12, 18), bgColor: '#F8F9FA', title: "Kanäle M-R" },
   ];
 
-  const dirtyChannels = Object.keys(config).filter(ch => {
-    const a = config[ch] || {}, b = savedConfig[ch] || {};
-    return (a.label || "") !== (b.label || "") ||
-      (parseFloat(a.schwellwert) || 0) !== (parseFloat(b.schwellwert) || 0) ||
-      (parseFloat(a.hoechstwert) || 0) !== (parseFloat(b.hoechstwert) || 0);
-  });
-  const isDirty = dirtyChannels.length > 0;
-
-  const matchesFilters = (channel, cfg, groupIdx) => {
-    if (phaseFilter.length > 0 && !phaseFilter.includes(groupIdx)) return false;
-    const status = getConfigRowStatus(cfg);
-    if (statusFilter !== "all" && status !== statusFilter) return false;
-    if (searchTerm.trim()) {
-      const q = searchTerm.trim().toLowerCase();
-      const label = (cfg.label || "").toLowerCase();
-      if (!channel.toLowerCase().includes(q) && !label.includes(q)) return false;
-    }
-    return true;
-  };
-
-  const totalWarnCount  = entries.filter(([, cfg]) => getConfigRowStatus(cfg) === "warn").length;
-  const totalErrorCount = entries.filter(([, cfg]) => getConfigRowStatus(cfg) === "error").length;
-  const hasActiveFilters = Boolean(searchTerm) || phaseFilter.length > 0 || statusFilter !== "all";
-
   return (
-    <Paper elevation={0} sx={{ p: { xs: 2.5, md: 3.5 }, mt: 3, bgcolor: PANEL, position: 'relative', overflow: 'hidden' }}>
-      <Box sx={{ position: 'absolute', top: 0, left: 0, right: 0, height: 4, bgcolor: BRAND }} />
-
-      {/* ── Kopfzeile ── */}
-      <Box display="flex" justifyContent="space-between" alignItems="center" mb={3} flexWrap="wrap" gap={1.5}>
-        <Box display="flex" alignItems="center" gap={1.4}>
-          <SectionHeaderIcon Icon={SettingsInputComponentIcon} />
-          <Box>
-            <Typography variant="h5" sx={{ color: INK, lineHeight: 1.2 }}>Kanal-Einstellungen</Typography>
-            <Typography variant="caption" sx={{ color: INK_MUTED }}>Schwellwerte &amp; Bezeichnungen je Messkanal · {entries.length} Kanäle</Typography>
-          </Box>
-        </Box>
-
-        <Box display="flex" alignItems="center" gap={1.5} flexWrap="wrap">
-          {isDirty && (
-            <Chip size="small" label={`${dirtyChannels.length} ungespeichert`} icon={<EditNoteIcon sx={{ fontSize: 16 }} />}
-              sx={{ bgcolor: WARNING_BG, color: WARNING, "& .MuiChip-icon": { color: WARNING } }} />
-          )}
-          {isDirty && (
-            <Button size="small" variant="text" onClick={discardChanges} startIcon={<RestartAltIcon />}
-              sx={{ borderRadius: 20, color: INK_MUTED }}>
-              Verwerfen
-            </Button>
-          )}
-          <Button variant="contained" onClick={saveConfig} disabled={saving || !isDirty} startIcon={<SaveIcon />}
-            sx={{ bgcolor: SUCCESS, borderRadius: 20, boxShadow: 'none', '&:hover': { bgcolor: '#166B48', boxShadow: 'none' } }}>
-            {saving ? "Speichern..." : "Alle speichern"}
-          </Button>
-        </Box>
+    <Paper elevation={0} sx={{ p: 3, mt: 3, bgcolor: PANEL }}>
+      <Box display="flex" justifyContent="space-between" alignItems="center" mb={2} flexWrap="wrap" gap={1}>
+        <Typography variant="h5" sx={{ color: INK }}>Kanal-Einstellungen</Typography>
+        <Button variant="contained" onClick={saveConfig} disabled={saving} startIcon={<SaveIcon />}
+          sx={{ bgcolor: SUCCESS, borderRadius: 20, boxShadow: 'none', '&:hover': { bgcolor: '#166B48', boxShadow: 'none' } }}>
+          {saving ? "Speichern..." : "Alle speichern"}
+        </Button>
       </Box>
-
       {message && <Alert severity={messageType === "success" ? "success" : "error"} sx={{ mb: 2, borderRadius: 2 }}>{message}</Alert>}
-
-      {/* ── Filterleiste ── */}
-      <Paper elevation={0} sx={{ p: 2, mb: 3, bgcolor: SURFACE, display: "flex", alignItems: "center", gap: 1.5, flexWrap: "wrap" }}>
-        <TextField
-          size="small" placeholder="Kanal oder Bezeichnung suchen…" value={searchTerm}
-          onChange={e => setSearchTerm(e.target.value)}
-          sx={{ minWidth: 240, bgcolor: PANEL, borderRadius: 1 }}
-          InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon sx={{ fontSize: 18, color: INK_MUTED }} /></InputAdornment> }}
-        />
-
-        <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-
-        <Box display="flex" alignItems="center" gap={0.75}>
-          <TuneIcon sx={{ fontSize: 18, color: INK_MUTED }} />
-          {PHASE_STYLES.map((p, idx) => {
-            const active = phaseFilter.length === 0 || phaseFilter.includes(idx);
-            return (
-              <Chip
-                key={p.tag} label={p.tag} size="small" onClick={() => togglePhase(idx)}
-                icon={<Box sx={{ width: 8, height: 8, borderRadius: "50%", bgcolor: p.color, ml: "6px" }} />}
-                sx={{
-                  cursor: "pointer", border: `1px solid ${active ? BRAND : BORDER}`,
-                  bgcolor: active ? BRAND_BG : PANEL, color: active ? BRAND : INK_MUTED,
-                  opacity: active ? 1 : 0.6,
-                }} />
-            );
-          })}
-        </Box>
-
-        <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-
-        <ToggleButtonGroup size="small" exclusive value={statusFilter} onChange={(e, v) => v && setStatusFilter(v)}
-          sx={{ bgcolor: PANEL, '& .MuiToggleButton-root': { borderColor: BORDER } }}>
-          <ToggleButton value="all" sx={{ textTransform: "none", px: 1.5, fontSize: "0.75rem", fontWeight: 700 }}>Alle</ToggleButton>
-          <ToggleButton value="warn" sx={{ textTransform: "none", px: 1.5, fontSize: "0.75rem", fontWeight: 700, color: WARNING }}>
-            <WarningAmberIcon sx={{ fontSize: 15, mr: 0.5 }} /> {totalWarnCount}
-          </ToggleButton>
-          <ToggleButton value="error" sx={{ textTransform: "none", px: 1.5, fontSize: "0.75rem", fontWeight: 700, color: DANGER }}>
-            <ErrorOutlineIcon sx={{ fontSize: 15, mr: 0.5 }} /> {totalErrorCount}
-          </ToggleButton>
-        </ToggleButtonGroup>
-
-        {hasActiveFilters && (
-          <Button size="small" variant="contained" onClick={() => { setSearchTerm(""); setPhaseFilter([]); setStatusFilter("all"); }}
-            startIcon={<ClearAllIcon sx={{ fontSize: 16 }} />}
-            sx={{ ml: "auto", bgcolor: DANGER, borderRadius: 20, boxShadow: 'none', '&:hover': { bgcolor: '#A53023', boxShadow: 'none' } }}>
-            Filter zurücksetzen
-          </Button>
-        )}
-      </Paper>
-
-      {/* ── Kanalgruppen ── */}
-      {groups.map((group, groupIdx) => {
-        const visibleChannels = group.channels.filter(([ch, cfg]) => matchesFilters(ch, cfg, groupIdx));
-        if (visibleChannels.length === 0) return null;
-        return (
-          <Box key={groupIdx} sx={{ mb: 3, p: 2, borderRadius: 2, backgroundColor: group.bgColor, border: `1px solid ${BORDER}`, overflowX: "auto" }}>
-            <Box display="flex" alignItems="center" gap={1} sx={{ mb: 1 }}>
-              <Box sx={{ width: 10, height: 10, borderRadius: "50%", bgcolor: group.phase.color }} />
-              <Typography variant="subtitle1" sx={{ color: INK, fontWeight: 700 }}>
-                {group.phase.name} · {group.phase.tag}
-              </Typography>
-              <Chip size="small" label={`${visibleChannels.length} Kanäle`} sx={{ ml: "auto", bgcolor: PANEL, color: INK_MUTED }} />
-            </Box>
-            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: isMobile ? 560 : "auto" }}>
-              <thead>
-                <tr style={{ backgroundColor: "rgba(17,24,39,0.04)" }}>
-                  <th style={thStyle}>Kanal</th>
-                  <th style={thStyle}>Bezeichnung</th>
-                  <th style={thStyle}>Schwellwert (A)</th>
-                  <th style={thStyle}>Höchstwert (A)</th>
-                  <th style={{ ...thStyle, textAlign: "center" }}>Status</th>
+      {groups.map((group, idx) => (
+        <Box key={idx} sx={{ mb: 3, p: 2, borderRadius: 2, backgroundColor: group.bgColor, border: `1px solid ${BORDER}`, overflowX: "auto" }}>
+          <Typography variant="subtitle1" sx={{ mb: 1, color: INK, fontWeight: 700 }}>{group.title}</Typography>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: isMobile ? 500 : "auto" }}>
+            <thead>
+              <tr style={{ backgroundColor: "rgba(17,24,39,0.04)" }}>
+                <th style={{ padding: "12px", textAlign: "left", color: INK_MUTED, fontSize: '0.8rem' }}>Kanal</th>
+                <th style={{ padding: "12px", textAlign: "left", color: INK_MUTED, fontSize: '0.8rem' }}>Bezeichnung</th>
+                <th style={{ padding: "12px", textAlign: "left", color: INK_MUTED, fontSize: '0.8rem' }}>Schwellwert (A)</th>
+                <th style={{ padding: "12px", textAlign: "left", color: INK_MUTED, fontSize: '0.8rem' }}>Höchstwert (A)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {group.channels.map(([channel, cfg]) => (
+                <tr key={channel} style={{ borderBottom: `1px solid ${BORDER}` }}>
+                  <td style={{ padding: "8px", fontWeight: 700, fontFamily: MONO_FONT }}><ChannelLabel channel={channel} /></td>
+                  <td style={{ padding: "8px" }}>
+                    <TextField size="small" value={cfg.label || ""} onChange={e => handleChange(channel, "label", e.target.value)}
+                      fullWidth variant="outlined"
+                      InputProps={{ style: { color: INK, fontSize: "1rem", fontWeight: 600, backgroundColor: PANEL } }} />
+                  </td>
+                  <td style={{ padding: "8px" }}>
+                    <TextField type="number" size="small" value={cfg.schwellwert || 0}
+                      onChange={e => handleChange(channel, "schwellwert", parseFloat(e.target.value) || 0)}
+                      variant="outlined" inputProps={{ step: "0.1", style: { width: isMobile ? 80 : 100 } }} />
+                  </td>
+                  <td style={{ padding: "8px" }}>
+                    <TextField type="number" size="small" value={cfg.hoechstwert || 0}
+                      onChange={e => handleChange(channel, "hoechstwert", parseFloat(e.target.value) || 0)}
+                      variant="outlined" inputProps={{ step: "0.1", style: { width: isMobile ? 80 : 100 } }} />
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {visibleChannels.map(([channel, cfg]) => {
-                  const status = CONFIG_STATUS[getConfigRowStatus(cfg)];
-                  const StatusIcon = status.Icon;
-                  const isRowDirty = dirtyChannels.includes(channel);
-                  return (
-                    <tr key={channel} style={{ borderBottom: `1px solid ${BORDER}`, backgroundColor: isRowDirty ? WARNING_BG : "transparent" }}>
-                      <td style={{ padding: "8px", fontWeight: 700, fontFamily: MONO_FONT }}><ChannelLabel channel={channel} /></td>
-                      <td style={{ padding: "8px" }}>
-                        <TextField size="small" value={cfg.label || ""} placeholder="Bezeichnung eingeben"
-                          onChange={e => handleChange(channel, "label", e.target.value)}
-                          fullWidth variant="outlined"
-                          InputProps={{ style: { color: INK, fontSize: "1rem", fontWeight: 600, backgroundColor: PANEL } }} />
-                      </td>
-                      <td style={{ padding: "8px" }}>
-                        <TextField type="number" size="small" value={cfg.schwellwert ?? 0}
-                          onChange={e => handleChange(channel, "schwellwert", parseFloat(e.target.value) || 0)}
-                          variant="outlined" inputProps={{ step: "0.1", style: { width: isMobile ? 80 : 100 } }}
-                          InputProps={{ style: { backgroundColor: PANEL, fontFamily: MONO_FONT } }} />
-                      </td>
-                      <td style={{ padding: "8px" }}>
-                        <TextField type="number" size="small" value={cfg.hoechstwert ?? 0}
-                          onChange={e => handleChange(channel, "hoechstwert", parseFloat(e.target.value) || 0)}
-                          variant="outlined" inputProps={{ step: "0.1", style: { width: isMobile ? 80 : 100 } }}
-                          InputProps={{ style: { backgroundColor: PANEL, fontFamily: MONO_FONT } }} />
-                      </td>
-                      <td style={{ padding: "8px", textAlign: "center" }}>
-                        <Tooltip title={status.label === "OK" ? "Werte plausibel" : status.label === "Prüfen" ? "Höchstwert fehlt oder ist 0" : "Schwellwert > Höchstwert"}>
-                          <Chip size="small" icon={<StatusIcon sx={{ fontSize: "15px !important", color: `${status.color} !important` }} />}
-                            label={status.label}
-                            sx={{ bgcolor: status.bg, color: status.color, fontSize: "0.7rem" }} />
-                        </Tooltip>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </Box>
-        );
-      })}
-
-      {groups.every((group, groupIdx) => group.channels.filter(([ch, cfg]) => matchesFilters(ch, cfg, groupIdx)).length === 0) && (
-        <Typography sx={{ color: INK_MUTED, py: 4, textAlign: "center" }}>Keine Kanäle entsprechen den aktuellen Filtern.</Typography>
-      )}
+              ))}
+            </tbody>
+          </table>
+        </Box>
+      ))}
     </Paper>
   );
 };
 
-// ─── ENERGIE-MANAGER ──────────────────────────────────────────────────────────
+// ✅ Palette de couleurs, une par canal (CH1-CH18), utilisée dans Kanal Zähler
+// pour repérer visuellement chaque canal.
+const CHANNEL_COLOR_PALETTE = [
+  "#1976d2", "#2e7d32", "#e65100", "#6a1b9a", "#00838f", "#c2185b",
+  "#5d4037", "#455a64", "#f9a825", "#00695c", "#4527a0", "#ad1457",
+  "#37474f", "#6d4c41", "#0277bd", "#558b2f", "#ef6c00", "#8e24aa",
+];
+const getChannelColor = (channel) => {
+  const idx = DEFAULT_CHANNELS.indexOf(channel);
+  if (idx >= 0) return CHANNEL_COLOR_PALETTE[idx % CHANNEL_COLOR_PALETTE.length];
+  const num = parseInt(String(channel).replace(/\D/g, ""), 10);
+  if (isNaN(num)) return INK_MUTED;
+  return CHANNEL_COLOR_PALETTE[(num - 1) % CHANNEL_COLOR_PALETTE.length];
+};
+
+// ─── ENERGIE-MANAGER (Kanal Zähler) ───────────────────────────────────────────
 const EnergyManager = () => {
   const [energyData, setEnergyData]                         = useState({});
   const [loading, setLoading]                               = useState(true);
@@ -733,14 +560,13 @@ const EnergyManager = () => {
   const [globalEnergyValue, setGlobalEnergyValue]           = useState("");
   const [message, setMessage]                               = useState("");
   const [messageType, setMessageType]                       = useState("success");
-  const [searchTerm, setSearchTerm]                         = useState("");
-  const [phaseFilter, setPhaseFilter]                       = useState([]);
-  const [, setTick]                                         = useState(0);
+  const [channelAnchorEl, setChannelAnchorEl]               = useState(null);
   const isMobile = useMediaQuery("(max-width:600px)");
 
   const loadEnergyData = async () => {
     try {
       const res = await axios.get(`${API_BASE_URL}/energy-values`);
+      // ✅ Décodage sûr des labels reçus
       const decoded = Object.fromEntries(
         Object.entries(res.data).map(([ch, d]) => [ch, { ...d, label: safeDecodeLabel(d?.label) }])
       );
@@ -759,22 +585,13 @@ const EnergyManager = () => {
     return () => clearInterval(interval);
   }, []);
 
-  useEffect(() => {
-    const iv = setInterval(() => setTick(t => t + 1), 15000);
-    return () => clearInterval(iv);
-  }, []);
-
-  const handleSelectAllEnergyChannels = (visibleKeys) => {
-    setSelectedEnergyChannels(prev =>
-      visibleKeys.every(k => prev.includes(k)) ? prev.filter(k => !visibleKeys.includes(k)) : Array.from(new Set([...prev, ...visibleKeys]))
-    );
+  const handleSelectAllEnergyChannels = () => {
+    const all = Object.keys(energyData);
+    setSelectedEnergyChannels(prev => prev.length === all.length ? [] : all);
   };
 
   const handleEnergyChannelToggle = ch =>
     setSelectedEnergyChannels(prev => prev.includes(ch) ? prev.filter(c => c !== ch) : [...prev, ch]);
-
-  const togglePhase = (idx) =>
-    setPhaseFilter(prev => prev.includes(idx) ? prev.filter(p => p !== idx) : [...prev, idx]);
 
   const sendGlobalEnergyValue = async () => {
     const value = parseFloat(globalEnergyValue);
@@ -824,105 +641,68 @@ const EnergyManager = () => {
   if (!energyData || typeof energyData !== "object" || Object.keys(energyData).length === 0)
     return <Typography sx={{ p: 3, color: INK_MUTED }}>Keine Daten verfügbar...</Typography>;
 
-  const entries   = Object.entries(energyData);
-  const chunkSize = Math.ceil(entries.length / 3) || 1;
-  const groups    = [
-    { channels: entries.slice(0, chunkSize),             phase: PHASE_STYLES[0], bgColor: SURFACE   },
-    { channels: entries.slice(chunkSize, chunkSize * 2), phase: PHASE_STYLES[1], bgColor: '#EEF1F4' },
-    { channels: entries.slice(chunkSize * 2),            phase: PHASE_STYLES[2], bgColor: '#F8F9FA' },
+  const entries       = Object.entries(energyData);
+  const allChannels   = Object.keys(energyData);
+  const selectedCount = selectedEnergyChannels.length;
+  const totalCount    = allChannels.length;
+  const groups        = [
+    { channels: entries.slice(0, 6),   bgColor: SURFACE,   title: "Kanäle A-F" },
+    { channels: entries.slice(6, 12),  bgColor: '#EEF1F4', title: "Kanäle G-L" },
+    { channels: entries.slice(12, 18), bgColor: '#F8F9FA', title: "Kanäle M-R" },
   ];
 
-  const matchesFilters = (channel, data_, groupIdx) => {
-    if (phaseFilter.length > 0 && !phaseFilter.includes(groupIdx)) return false;
-    if (searchTerm.trim()) {
-      const q = searchTerm.trim().toLowerCase();
-      const label = (data_?.label || "").toLowerCase();
-      if (!channel.toLowerCase().includes(q) && !label.includes(q)) return false;
-    }
-    return true;
-  };
-
-  const visibleGroups = groups.map((g, idx) => ({
-    ...g, visible: g.channels.filter(([ch, d]) => matchesFilters(ch, d, idx)),
-  }));
-  const visibleKeys = visibleGroups.flatMap(g => g.visible.map(([ch]) => ch));
-  const selectedCount = selectedEnergyChannels.length;
-  const allVisibleSelected = visibleKeys.length > 0 && visibleKeys.every(k => selectedEnergyChannels.includes(k));
-  const someVisibleSelected = visibleKeys.some(k => selectedEnergyChannels.includes(k));
-  const hasActiveFilters = Boolean(searchTerm) || phaseFilter.length > 0;
-
   return (
-    <Paper elevation={0} sx={{ p: { xs: 2.5, md: 3.5 }, mt: 3, bgcolor: PANEL, position: 'relative', overflow: 'hidden' }}>
-      <Box sx={{ position: 'absolute', top: 0, left: 0, right: 0, height: 4, bgcolor: SUCCESS }} />
-
-      {/* ── Kopfzeile ── */}
-      <Box display="flex" justifyContent="space-between" alignItems="center" mb={3} flexWrap="wrap" gap={1.5}>
-        <Box display="flex" alignItems="center" gap={1.4}>
-          <SectionHeaderIcon Icon={BatteryChargingFullIcon} color={SUCCESS} bg={SUCCESS_BG} />
-          <Box>
-            <Typography variant="h5" sx={{ color: INK, lineHeight: 1.2 }}>Zählerstände</Typography>
-            <Typography variant="caption" sx={{ color: INK_MUTED }}>Temporäre Energiezähler je Messkanal · {entries.length} Kanäle</Typography>
-          </Box>
+    <Paper elevation={0} sx={{ p: 3, mt: 3, bgcolor: PANEL }}>
+      <Box display="flex" justifyContent="space-between" alignItems="center" mb={2} flexWrap="wrap" gap={1}>
+        <Box display="flex" alignItems="center" gap={1}>
+          <BatteryChargingFullIcon sx={{ color: SUCCESS }} />
+          <Typography variant="h5" sx={{ color: INK }}>Kanal Zähler</Typography>
         </Box>
-        <Button variant="outlined" onClick={loadEnergyData} startIcon={<UpdateIcon />} sx={{ borderColor: BORDER, color: INK, borderRadius: 20 }}>
-          Aktualisieren
-        </Button>
+        <Button variant="outlined" onClick={loadEnergyData} startIcon={<UpdateIcon />} sx={{ borderColor: BORDER, color: INK, borderRadius: 20 }}>Aktualisieren</Button>
       </Box>
-
       {message && <Alert severity={messageType === "success" ? "success" : "error"} sx={{ mb: 2, borderRadius: 2 }}>{message}</Alert>}
 
-      {/* ── Filterleiste ── */}
-      <Paper elevation={0} sx={{ p: 2, mb: 2, bgcolor: SURFACE, display: "flex", alignItems: "center", gap: 1.5, flexWrap: "wrap" }}>
-        <TextField
-          size="small" placeholder="Kanal oder Bezeichnung suchen…" value={searchTerm}
-          onChange={e => setSearchTerm(e.target.value)}
-          sx={{ minWidth: 240, bgcolor: PANEL, borderRadius: 1 }}
-          InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon sx={{ fontSize: 18, color: INK_MUTED }} /></InputAdornment> }}
-        />
-        <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-        <Box display="flex" alignItems="center" gap={0.75}>
-          <TuneIcon sx={{ fontSize: 18, color: INK_MUTED }} />
-          {PHASE_STYLES.map((p, idx) => {
-            const active = phaseFilter.length === 0 || phaseFilter.includes(idx);
-            return (
-              <Chip
-                key={p.tag} label={p.tag} size="small" onClick={() => togglePhase(idx)}
-                icon={<Box sx={{ width: 8, height: 8, borderRadius: "50%", bgcolor: p.color, ml: "6px" }} />}
-                sx={{
-                  cursor: "pointer", border: `1px solid ${active ? BRAND : BORDER}`,
-                  bgcolor: active ? BRAND_BG : PANEL, color: active ? BRAND : INK_MUTED,
-                  opacity: active ? 1 : 0.6,
-                }} />
-            );
-          })}
-        </Box>
-        {hasActiveFilters && (
-          <Button size="small" variant="contained" onClick={() => { setSearchTerm(""); setPhaseFilter([]); }}
-            startIcon={<ClearAllIcon sx={{ fontSize: 16 }} />}
-            sx={{ ml: "auto", bgcolor: DANGER, borderRadius: 20, boxShadow: 'none', '&:hover': { bgcolor: '#A53023', boxShadow: 'none' } }}>
-            Filter zurücksetzen
-          </Button>
-        )}
-      </Paper>
-
-      {/* ── Stapelaktion: Wert setzen ── */}
       <Paper elevation={0} sx={{ p: 2, mb: 3, bgcolor: SURFACE }}>
-        <Box display="flex" alignItems="center" gap={1} sx={{ mb: 2 }}>
-          <LabelImportantOutlinedIcon sx={{ fontSize: 18, color: INK_MUTED }} />
-          <Typography variant="subtitle1" sx={{ color: INK, fontWeight: 700 }}>Zählerwert setzen</Typography>
-          <Chip size="small" label={`${selectedCount} ausgewählt`}
-            sx={{ ml: "auto", bgcolor: selectedCount > 0 ? SUCCESS_BG : PANEL, color: selectedCount > 0 ? SUCCESS : INK_MUTED }} />
-        </Box>
+        <Typography variant="subtitle1" sx={{ mb: 2, color: INK, fontWeight: 700 }}>Kanäle filtern / auswählen</Typography>
         <Box display="flex" alignItems="center" gap={2} flexWrap="wrap">
-          <FormControlLabel
-            sx={{ mr: 0 }}
-            control={<Checkbox size="small" checked={allVisibleSelected} indeterminate={someVisibleSelected && !allVisibleSelected}
-              onChange={() => handleSelectAllEnergyChannels(visibleKeys)} />}
-            label={<Typography variant="caption" sx={{ color: INK_MUTED }}>Alle sichtbaren</Typography>} />
+          <Button variant="outlined" onClick={e => { e.stopPropagation(); setChannelAnchorEl(e.currentTarget); }}
+            endIcon={<span>▼</span>} sx={{ minWidth: 200, borderColor: BORDER, color: INK, bgcolor: PANEL }}>
+            {selectedCount === 0 ? "Keine Kanäle" : selectedCount === totalCount ? "Alle Kanäle" : `${selectedCount} Kanäle`}
+          </Button>
+          <Popover open={Boolean(channelAnchorEl)} anchorEl={channelAnchorEl}
+            onClose={() => setChannelAnchorEl(null)}
+            anchorOrigin={{ vertical: "bottom", horizontal: "left" }}
+            disableAutoFocus disableEnforceFocus keepMounted>
+            <Box sx={{ p: 2, minWidth: 250, maxWidth: 350 }}>
+              <FormControlLabel
+                control={<Checkbox checked={selectedCount === totalCount} indeterminate={selectedCount > 0 && selectedCount < totalCount} onChange={handleSelectAllEnergyChannels} />}
+                label="Alle Kanäle" />
+              <Divider sx={{ my: 1 }} />
+              <Box sx={{ maxHeight: 300, overflow: "auto" }}>
+                {allChannels.map(ch => {
+                  const chLabel = energyData[ch]?.label;
+                  const displayText = (chLabel && chLabel !== ch)
+                    ? <><ChannelLabel channel={ch} /> – {chLabel}</>
+                    : <ChannelLabel channel={ch} />;
+                  return (
+                    <FormControlLabel key={ch}
+                      control={<Checkbox checked={selectedEnergyChannels.includes(ch)} onChange={() => handleEnergyChannelToggle(ch)} />}
+                      label={
+                        <Box display="flex" alignItems="center" gap={1}>
+                          <Box sx={{ width: 8, height: 8, borderRadius: "50%", backgroundColor: getChannelColor(ch), flexShrink: 0 }} />
+                          <span>{displayText}</span>
+                        </Box>
+                      }
+                      sx={{ display: "block" }} />
+                  );
+                })}
+              </Box>
+            </Box>
+          </Popover>
           <TextField type="number" size="small" label="Wert (kWh)" value={globalEnergyValue}
             onChange={e => setGlobalEnergyValue(e.target.value)}
-            inputProps={{ step: "0.1", style: { width: 120, fontFamily: MONO_FONT } }} sx={{ flex: 1, bgcolor: PANEL, borderRadius: 1 }} />
-          <Button variant="contained" onClick={sendGlobalEnergyValue} startIcon={<SendIcon />}
+            inputProps={{ step: "0.1", style: { width: 120 } }} sx={{ flex: 1, bgcolor: PANEL, borderRadius: 1 }} />
+          <Button variant="contained" onClick={sendGlobalEnergyValue}
             disabled={loading || selectedEnergyChannels.length === 0 || globalEnergyValue === ""}
             sx={{ bgcolor: SUCCESS, boxShadow: 'none', borderRadius: 20, '&:hover': { bgcolor: '#166B48', boxShadow: 'none' } }}>
             Absenden
@@ -933,68 +713,53 @@ const EnergyManager = () => {
         </Typography>
       </Paper>
 
-      {/* ── Kanalgruppen ── */}
-      {visibleGroups.map((group, groupIdx) => {
-        if (group.visible.length === 0) return null;
-        return (
-          <Box key={groupIdx} sx={{ mb: 3, p: 2, borderRadius: 2, backgroundColor: group.bgColor, border: `1px solid ${BORDER}`, overflowX: "auto" }}>
-            <Box display="flex" alignItems="center" gap={1} sx={{ mb: 1 }}>
-              <Box sx={{ width: 10, height: 10, borderRadius: "50%", bgcolor: group.phase.color }} />
-              <Typography variant="subtitle1" sx={{ color: INK, fontWeight: 700 }}>
-                {group.phase.name} · {group.phase.tag}
-              </Typography>
-              <Chip size="small" label={`${group.visible.length} Kanäle`} sx={{ ml: "auto", bgcolor: PANEL, color: INK_MUTED }} />
-            </Box>
-            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: isMobile ? 560 : "auto" }}>
-              <thead>
-                <tr style={{ backgroundColor: "rgba(17,24,39,0.04)" }}>
-                  <th style={{ padding: "8px", width: 40 }}></th>
-                  <th style={{ ...thStyle, padding: "8px" }}>Kanal</th>
-                  <th style={{ ...thStyle, padding: "8px" }}>Bezeichnung</th>
-                  <th style={{ ...thStyle, padding: "8px", textAlign: "center" }}>Energie (kWh)</th>
-                  <th style={{ ...thStyle, padding: "8px", textAlign: "center" }}>Letzte Änderung</th>
-                </tr>
-              </thead>
-              <tbody>
-                {group.visible.map(([channel, data_]) => {
-                  const isSelected = selectedEnergyChannels.includes(channel);
-                  const relative   = formatRelativeTime(data_?.updatedAt);
-                  return (
-                    <tr key={channel} style={{ borderBottom: `1px solid ${BORDER}`, borderLeft: `4px solid ${group.phase.color}`, backgroundColor: isSelected ? SUCCESS_BG : "transparent" }}>
-                      <td style={{ padding: "8px", textAlign: "center" }}>
-                        <Checkbox size="small" checked={isSelected} onChange={() => handleEnergyChannelToggle(channel)} />
-                      </td>
-                      <td style={{ padding: "8px", fontWeight: 700, fontFamily: MONO_FONT, color: INK }}>
+      {groups.map((group, idx) => (
+        <Box key={idx} sx={{ mb: 3, p: 2, borderRadius: 2, backgroundColor: group.bgColor, border: `1px solid ${BORDER}`, overflowX: "auto" }}>
+          <Typography variant="subtitle1" sx={{ mb: 1, color: INK, fontWeight: 700 }}>{group.title}</Typography>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: isMobile ? 500 : "auto" }}>
+            <thead>
+              <tr style={{ backgroundColor: "rgba(17,24,39,0.04)" }}>
+                <th style={{ padding: "8px", textAlign: "left", color: INK_MUTED, fontSize: '0.8rem' }}>Kanal</th>
+                <th style={{ padding: "8px", textAlign: "left", color: INK_MUTED, fontSize: '0.8rem' }}>Bezeichnung</th>
+                <th style={{ padding: "8px", textAlign: "center", color: INK_MUTED, fontSize: '0.8rem' }}>Energie (kWh)</th>
+                <th style={{ padding: "8px", textAlign: "center", color: INK_MUTED, fontSize: '0.8rem' }}>Letzte Änderung</th>
+              </tr>
+            </thead>
+            <tbody>
+              {group.channels.map(([channel, data_]) => {
+                const isSelected  = selectedEnergyChannels.includes(channel);
+                const lastUpdated = data_?.updatedAt ? new Date(data_.updatedAt) : null;
+                return (
+                  <tr key={channel} style={{ borderBottom: `1px solid ${BORDER}`, borderLeft: `4px solid ${getChannelColor(channel)}`, backgroundColor: isSelected ? SUCCESS_BG : "transparent" }}>
+                    <td style={{ padding: "8px", fontWeight: 700, fontFamily: MONO_FONT, color: INK }}>
+                      <Box display="flex" alignItems="center" gap={1}>
+                        <Box sx={{ width: 10, height: 10, borderRadius: "50%", backgroundColor: getChannelColor(channel), flexShrink: 0 }} />
                         <ChannelLabel channel={channel} />
-                      </td>
-                      <td style={{ padding: "8px" }}>
-                        <Typography variant="body2" sx={{ fontWeight: 600, color: INK }}>{data_?.label || <ChannelLabel channel={channel} />}</Typography>
-                      </td>
-                      <td style={{ padding: "8px", textAlign: "center" }}>
-                        <Typography variant="body2" sx={{ fontWeight: 700, color: ACCENT, fontFamily: MONO_FONT }}>
-                          {(data_?.temporary || 0).toFixed(2)} kWh
-                        </Typography>
-                      </td>
-                      <td style={{ padding: "8px", textAlign: "center" }}>
-                        {relative ? (
-                          <Box display="flex" alignItems="center" justifyContent="center" gap={0.5}>
-                            <ScheduleIcon sx={{ fontSize: 14, color: INK_MUTED }} />
-                            <Typography variant="caption" sx={{ color: INK_MUTED }}>{relative}</Typography>
-                          </Box>
-                        ) : <Typography variant="caption" sx={{ color: INK_MUTED }}>—</Typography>}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </Box>
-        );
-      })}
-
-      {visibleKeys.length === 0 && (
-        <Typography sx={{ color: INK_MUTED, py: 4, textAlign: "center" }}>Keine Kanäle entsprechen den aktuellen Filtern.</Typography>
-      )}
+                      </Box>
+                    </td>
+                    <td style={{ padding: "8px" }}>
+                      <Typography variant="body2" sx={{ fontWeight: 600, color: INK }}>{data_?.label || <ChannelLabel channel={channel} />}</Typography>
+                    </td>
+                    <td style={{ padding: "8px", textAlign: "center" }}>
+                      <Typography variant="body2" sx={{ fontWeight: 700, color: ACCENT, fontFamily: MONO_FONT }}>
+                        {(data_?.temporary || 0).toFixed(2)} kWh
+                      </Typography>
+                    </td>
+                    <td style={{ padding: "8px", textAlign: "center", fontSize: "0.75rem" }}>
+                      {lastUpdated && !isNaN(lastUpdated.getTime()) ? (
+                        <>
+                          <Typography variant="caption" component="div" sx={{ color: INK }}>{lastUpdated.toLocaleDateString()}</Typography>
+                          <Typography variant="caption" component="div" sx={{ color: INK_MUTED }}>{lastUpdated.toLocaleTimeString()}</Typography>
+                        </>
+                      ) : <Typography variant="caption" sx={{ color: INK_MUTED }}>—</Typography>}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </Box>
+      ))}
     </Paper>
   );
 };
