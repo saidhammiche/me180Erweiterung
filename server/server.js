@@ -116,6 +116,46 @@ function getKundenLabel(device, kanal) {
     return kundenLabels[getKundenLabelKey(device, kanal)] || "";
 }
 
+// ========== CORRECTION D'ÉCHELLE PAR RÉSOLUTION (Höchstwert / Messbereich) ==========
+// ✅ AJOUT : selon la doc CGI mE180 ("Messbereiche aller Messkanäle ermitteln",
+// tableau des résolutions), la résolution interne du contrôleur dépend du
+// Messbereichsendwert (Höchstwert) configuré PAR CANAL :
+//
+//   Höchstwert 0    - 64 A    -> resolution 1     (valeur = valeur réelle)
+//   Höchstwert 64   - 640 A   -> resolution 10    (valeur brute x10 trop petite)
+//   Höchstwert 640  - 6400 A  -> resolution 100   (valeur brute x100 trop petite)
+//   Höchstwert 6400 - 64000 A -> resolution 1000  (valeur brute x1000 trop petite)
+//
+// Concrètement : deux canaux mesurant le même courant physique peuvent
+// afficher des valeurs différentes (ex: canal 1 = 7,529 A vs canal 6 = 0,75 A)
+// simplement parce qu'ils n'ont pas le même Höchstwert configuré sur le
+// Messkoffer (donc pas la même résolution interne). On corrige donc ici,
+// dynamiquement et par canal, à partir du Höchstwert réellement en mémoire
+// (channelConfig[ch].hoechstwert, tenu à jour depuis le Messkoffer) — plutôt
+// que sur une liste de canaux fixe qui casserait si un calibre change.
+//
+// S'applique à Strom et Wirkleistung (lues brutes depuis InfluxDB).
+// Blindleistung/Scheinleistung, calculées à partir de Wirkleistung + CosPhi
+// via computeApparentAndReactive(), sont corrigées automatiquement.
+//
+// ⚠️ DÉSACTIVÉE (3e itération) : le vrai bug était côté Node-RED (flow mE180,
+// fonctions "Wirkleistung_ChN") — les canaux 5, 6, 11, 12, 17, 18
+// (Höchstwert=1000 A) y appliquaient le même facteur "* 10" que tous les
+// autres canaux (Höchstwert=125/250 A), alors qu'ils avaient besoin de
+// "* 100". Corrigé directement dans le flow Node-RED : Node-RED écrit
+// désormais la bonne valeur dans InfluxDB pour TOUS les consommateurs
+// (cette API ET Grafana, qui lit directement InfluxDB sans passer par ici).
+//
+// Comme la donnée est maintenant juste dès l'écriture, cette fonction ne
+// doit plus rien corriger ici — sinon on obtiendrait un double correctif
+// (×100 dans Node-RED + ×10 ici = ×1000, complètement faux). Elle est
+// gardée en passthrough (et non supprimée) pour ne pas casser les appels
+// existants dans /data et /history, et pour pouvoir la réactiver facilement
+// si un nouveau canal montre un écart d'échelle à l'avenir.
+function correctScale(ch, value) {
+    return value;
+}
+
 // ========== MESSKOFFER CGI HELPERS ==========
 
 async function getLabelsFromMesskoffer() {
@@ -463,10 +503,12 @@ function computeApparentAndReactiveFromUI(U, I, P) {
 
 // ========== DECOUVERTE DYNAMIQUE SENSOR/KANAL (FONCTION PARTAGEE) ==========
 
-// ⚠️ NON UTILISÉE DANS discoverSensors() : servait uniquement a la
-// correlation CosPhi horaire (CGI) via un canal global "Sensor0", supprimee
-// ci-dessous puisque CosPhi est maintenant lu directement par Device/Kanal.
-// Fonction laissee en place (non appelee) pour ne rien modifier d'autre.
+// ✅ RÉACTIVÉE : sert désormais à retrouver, pour un Device+Kanal du système
+// Volt1000S (Sensor1/Sensor2/Sensor3, mesure "sensoren"), le canal PH
+// correspondant (ex: "PH1 f") afin de lire son Höchstwert dans channelConfig
+// et lui appliquer la même correction d'échelle que le système Messkoffer
+// (voir correctScale plus haut) — même cause (Höchstwert > 640 A selon le
+// calibre de pince), même symptôme (valeur brute x10 trop petite).
 function findChannelForDeviceKanal(device, kanal) {
     for (const [ch, map] of Object.entries(channelMapping)) {
         if (map.device === device && map.kanal === String(kanal)) return ch;
@@ -1019,8 +1061,17 @@ app.get("/data", async (req, res) => {
             const voltKanal = Math.min(3, Math.ceil(chNum / 6));
             const U = voltagesU[voltKanal] ?? null;
             const influxData = byChannel[ch] || {};
-            const I = influxData.Strom        ?? null;
-            const P = influxData.Wirkleistung ?? null;
+
+            // ✅ CORRIGÉ : Strom et Wirkleistung sont désormais passés par
+            // correctScale(ch, ...), qui applique le facteur d'échelle
+            // (1 / 10 / 100 / 1000) correspondant au Höchstwert réellement
+            // configuré sur CE canal (voir "CORRECTION D'ÉCHELLE PAR
+            // RÉSOLUTION" plus haut). Sans cela, deux canaux avec un
+            // Höchstwert différent affichaient des valeurs incohérentes entre
+            // elles pour un même courant physique (ex: canal 1 = 7,529 A vs
+            // canal 6 = 0,75 A).
+            const I = correctScale(ch, influxData.Strom        ?? null);
+            const P = correctScale(ch, influxData.Wirkleistung ?? null);
             const cosPhi = influxData.CosinusPhi ?? null;
 
             result[ch] = {
@@ -1036,6 +1087,9 @@ app.get("/data", async (req, res) => {
                     : null
             };
 
+            // ✅ Blindleistung/Scheinleistung calculées à partir de P (déjà
+            // corrigé ci-dessus) et cosPhi : corrigées automatiquement, pas
+            // besoin d'appliquer correctScale() une deuxième fois ici.
             const { S, Q } = computeApparentAndReactive(P, cosPhi);
             result[ch].Scheinleistung = S;
             result[ch].Blindleistung  = Q;
@@ -1086,13 +1140,21 @@ app.get("/history/:channel", async (req, res) => {
             const t = row._time;
             if (!pointsByTime[t]) pointsByTime[t] = { time: t };
             const val = row._value ?? 0;
-            if      (row._field === "Strom")          pointsByTime[t].Strom        = val;
-            else if (row._field === "Wirkleistung")   pointsByTime[t].Wirkleistung = val;
+            // ✅ CORRIGÉ : Strom et Wirkleistung passent par correctScale(ch, val)
+            // pour appliquer le facteur d'échelle propre à CE canal (Höchstwert
+            // réel), exactement comme dans /data ci-dessus — sinon le graphique
+            // "Trends" affichait un historique 10x (ou plus) trop petit sur les
+            // canaux dont le Höchstwert configuré dépasse 64 A.
+            if      (row._field === "Strom")          pointsByTime[t].Strom        = correctScale(ch, val);
+            else if (row._field === "Wirkleistung")   pointsByTime[t].Wirkleistung = correctScale(ch, val);
             else if (row._field === "Leistungsfaktor") pointsByTime[t].CosinusPhi  = val;
             else if (row._field === "Energie")         pointsByTime[t].Energie_temp = val;
         });
         const data = Object.values(pointsByTime)
             .map(point => {
+                // ✅ Blindleistung/Scheinleistung calculées à partir de
+                // point.Wirkleistung, déjà corrigé ci-dessus — corrigées
+                // automatiquement, pas de correctScale() supplémentaire ici.
                 const { S, Q } = computeApparentAndReactive(point.Wirkleistung ?? 0, point.CosinusPhi ?? 0);
                 return { ...point, Scheinleistung: S ?? 0, Blindleistung: Q ?? 0 };
             })
