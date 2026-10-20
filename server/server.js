@@ -22,55 +22,66 @@ const influxDB = new InfluxDB({ url: INFLUX_URL, token: INFLUX_TOKEN });
 const queryApi = influxDB.getQueryApi(INFLUX_ORG);
 const writeApi = influxDB.getWriteApi(INFLUX_ORG, INFLUX_BUCKET);
 
-const mego4_MEASUREMENT = "mego4";
-
 // ========== CONTRÔLEURS mE180 ==========
-// ✅ Chaque contrôleur a sa propre IP, son ID, son tag "Device" dans InfluxDB
-// (mego4) et son propre état (config + compteurs). Le contrôleur 2 n'est
-// activé que si MESSE_IP_2 et MESSE_ID_2 sont définis dans le .env : sans eux,
-// le serveur fonctionne exactement comme avant, avec un seul contrôleur.
+// ✅ Chaque contrôleur a : IP, ID, measurement InfluxDB (table), tag "Device"
+// (optionnel) et son propre état.
 //
 //   .env :
-//     MESSE_IP=192.168.1.7      MESSE_ID=51105      MEGO4_DEVICE=mE180
-//     MESSE_IP_2=192.168.1.8    MESSE_ID_2=xxxxx    MEGO4_DEVICE_2=mE180_2
+//     MESSE_IP=192.168.1.7    MESSE_ID=51105    MEGO_MEASUREMENT=mego4    MEGO4_DEVICE=mE180
+//     MESSE_IP_2=192.168.1.8  MESSE_ID_2=51105  MEGO_MEASUREMENT_2=mego1  MEGO4_DEVICE_2=
+//
+// Si MEGO4_DEVICE_2 est vide, on ne filtre PAS sur le tag Device (toute la
+// table mego1 appartient au contrôleur 2).
 const CONTROLLERS = {};
 
-function addController(num, ip, id, device, label) {
+function addController(num, ip, id, device, label, measurement) {
     if (!ip || !id) return;
     CONTROLLERS[num] = {
         num,
         ip,
         id,
-        device: device,
-        label:  label || `Controller ${num}`,
+        device:      device || "",
+        measurement: measurement,
+        label:       label || `Controller ${num}`,
         channelConfig: {},
         energyConfig:  {},
     };
 }
 
-addController("1", process.env.MESSE_IP,   process.env.MESSE_ID,   process.env.MEGO4_DEVICE   || "mE180",   process.env.MESSE_LABEL);
-addController("2", process.env.MESSE_IP_2, process.env.MESSE_ID_2, process.env.MEGO4_DEVICE_2 || "mE180_2", process.env.MESSE_LABEL_2);
+addController("1", process.env.MESSE_IP,   process.env.MESSE_ID,
+    process.env.MEGO4_DEVICE ?? "mE180", process.env.MESSE_LABEL,
+    process.env.MEGO_MEASUREMENT || "mego4");
+addController("2", process.env.MESSE_IP_2, process.env.MESSE_ID_2,
+    process.env.MEGO4_DEVICE_2 ?? "",    process.env.MESSE_LABEL_2,
+    process.env.MEGO_MEASUREMENT_2 || "mego1");
 
 if (!CONTROLLERS["1"]) {
     console.error("❌ ERREUR: Variables Messkoffer manquantes (MESSE_IP / MESSE_ID). Vérifiez votre fichier .env");
     process.exit(1);
 }
+if (!CONTROLLERS["2"]) {
+    console.warn("⚠️  Controller 2 NICHT aktiv: MESSE_IP_2 / MESSE_ID_2 fehlen im .env (oder werden nicht an den Container übergeben)");
+}
 
-// ✅ Retrouve le contrôleur demandé via ?controller=1|2 (1 par défaut).
-// Renvoie null (et répond 400) si le contrôleur n'existe pas.
+// ✅ Le contrôleur vient de ?controller=1|2 (1 par défaut).
 function getCtrl(req, res) {
-    const num  = String(req.query.controller || req.body?.controller || "1");
+    const num  = String(req.query.controller || "1");
     const ctrl = CONTROLLERS[num];
     if (!ctrl) {
-        res.status(400).json({ error: `Unbekannter Controller: ${num}` });
+        res.status(400).json({ error: `Unbekannter Controller: ${num}. Aktiv: ${Object.keys(CONTROLLERS).join(", ")}` });
         return null;
     }
     return ctrl;
 }
 
+// ✅ Filtres Flux communs : measurement du contrôleur + Device (si défini)
+function fluxSourceFilters(ctrl) {
+    let f = `|> filter(fn: (r) => r._measurement == "${ctrl.measurement}")`;
+    if (ctrl.device) f += `\n                  |> filter(fn: (r) => r.Device == "${ctrl.device}")`;
+    return f;
+}
+
 // ========== KANÄLE ==========
-// CH1 a..f (phase L1), CH2 g..l (phase L2), CH3 m..r (phase L3).
-// L'ORDRE correspond à la position 1..18 des CGI Messkoffer.
 const channelsList = [
     "CH1 a", "CH1 b", "CH1 c", "CH1 d", "CH1 e", "CH1 f",
     "CH2 g", "CH2 h", "CH2 i", "CH2 j", "CH2 k", "CH2 l",
@@ -82,7 +93,6 @@ function getChannelNumber(ch) {
     return idx === -1 ? null : idx + 1;
 }
 
-// Canaux avec correction ×10 (sauf CosinusPhi et Energie) : CGI 5, 6, 11, 12, 17, 18
 const CHANNELS_X10 = [5, 6, 11, 12, 17, 18].map(num => channelsList[num - 1]);
 
 function applyX10IfNeeded(ch, value) {
@@ -154,7 +164,7 @@ function initEnergyConfig(ctrl) {
 
 Object.values(CONTROLLERS).forEach(ctrl => { initConfig(ctrl); initEnergyConfig(ctrl); });
 
-// ========== MESSKOFFER CGI HELPERS (par contrôleur) ==========
+// ========== MESSKOFFER CGI HELPERS ==========
 
 async function getLabelsFromMesskoffer(ctrl) {
     const url = `http://${ctrl.ip}/get_sensor_config.cgi?id=${ctrl.id}&sensor=ch&field=label`;
@@ -254,8 +264,6 @@ async function getEnergiesFromMesskoffer(ctrl) {
         const temporary = {};
         if (typeof raw === "string") {
             const values = raw.split(";").map(v => parseFloat(v));
-            // Index 0 = compteur d'inscription, 1-18 = cumulées (ignorées),
-            // 19-36 = énergies temporaires des 18 canaux.
             for (let i = 0; i < 18; i++) {
                 temporary[channelsList[i]] = (values[19 + i] || 0) / 10000;
             }
@@ -293,10 +301,7 @@ async function getVoltagesFromMesskoffer(ctrl) {
     };
 }
 
-// ========== INIT CONFIG DEPUIS MESSKOFFER (avec retry, par contrôleur) ==========
-// Le contrôleur peut démarrer plus lentement que le conteneur : on réessaie
-// jusqu'au succès. Chaque contrôleur a sa propre boucle, indépendante : si le
-// n°2 est éteint, le n°1 fonctionne normalement.
+// ========== INIT CONFIG DEPUIS MESSKOFFER (avec retry) ==========
 async function initConfigFromMesskoffer(ctrl, retryDelayMs = 3000, maxAttempts = 0) {
     let attempt = 0;
     while (true) {
@@ -337,22 +342,21 @@ Object.values(CONTROLLERS).forEach(ctrl => initConfigFromMesskoffer(ctrl));
 const ENERGY_EPSILON = 1e-6;
 const hasEnergyChanged = (a, b) => Math.abs((a ?? 0) - (b ?? 0)) > ENERGY_EPSILON;
 
-// ========== HEALTHCHECK (Docker) ==========
-// ✅ OK dès que le contrôleur 1 est prêt — un contrôleur 2 éteint ne doit pas
-// faire redémarrer le conteneur.
+// ========== HEALTHCHECK ==========
 app.get("/health", (req, res) => {
     const configOk = Object.values(CONTROLLERS["1"].channelConfig).some(c => c.updatedAt > 0);
     res.status(configOk ? 200 : 503).send(configOk ? "ok" : "messkoffer not ready");
 });
 
 // ========== LISTE DES CONTRÔLEURS ==========
-// Utilisée par le frontend pour afficher (ou non) le sélecteur de contrôleur.
 app.get("/controllers", (req, res) => {
     res.json(Object.values(CONTROLLERS).map(c => ({
-        num:   c.num,
-        label: c.label,
-        ip:    c.ip,
-        ready: Object.values(c.channelConfig).some(cfg => cfg.updatedAt > 0)
+        num:         c.num,
+        label:       c.label,
+        ip:          c.ip,
+        measurement: c.measurement,
+        device:      c.device || null,
+        ready:       Object.values(c.channelConfig).some(cfg => cfg.updatedAt > 0)
     })));
 });
 
@@ -387,72 +391,86 @@ app.post("/messkoffer/reload", async (req, res) => {
 
 // ========== ROUTES CONFIG ==========
 
+function configSnapshot(ctrl) {
+    const result = {};
+    for (const ch of channelsList) {
+        result[ch] = {
+            label:       ctrl.channelConfig[ch]?.label       || ch,
+            schwellwert: ctrl.channelConfig[ch]?.schwellwert ?? 0,
+            hoechstwert: ctrl.channelConfig[ch]?.hoechstwert ?? getDefaultHoechstwert(ch)
+        };
+    }
+    return result;
+}
+
 app.get("/config", (req, res) => {
     const ctrl = getCtrl(req, res); if (!ctrl) return;
-    try {
-        const result = {};
-        for (const ch of channelsList) {
-            result[ch] = {
-                label:       ctrl.channelConfig[ch]?.label       || ch,
-                schwellwert: ctrl.channelConfig[ch]?.schwellwert ?? 0,
-                hoechstwert: ctrl.channelConfig[ch]?.hoechstwert ?? getDefaultHoechstwert(ch)
-            };
-        }
-        res.json(result);
-    } catch (err) {
-        console.error("/config error:", err);
-        res.status(500).json({ error: "Interner Fehler" });
-    }
+    res.json(configSnapshot(ctrl));
 });
 
 app.post("/config", async (req, res) => {
     const ctrl = getCtrl(req, res); if (!ctrl) return;
     const updates = req.body;
-    if (typeof updates !== "object") return res.status(400).json({ error: "JSON-Objekt erwartet" });
+    if (!updates || typeof updates !== "object") return res.status(400).json({ error: "JSON-Objekt erwartet" });
+
+    const cgiErrors = [];
+    const points    = [];
 
     try {
         for (const [ch, cfg] of Object.entries(updates)) {
-            if (!channelsList.includes(ch)) continue;
+            if (!channelsList.includes(ch) || !cfg || typeof cfg !== "object") continue;
 
-            const old        = ctrl.channelConfig[ch];
-            const newLabel   = cfg.label       !== undefined ? cfg.label                   : old.label;
-            const newSchwell = cfg.schwellwert !== undefined ? parseFloat(cfg.schwellwert) : old.schwellwert;
-            const newHoe     = cfg.hoechstwert !== undefined ? parseFloat(cfg.hoechstwert) : old.hoechstwert;
-            const chNum      = getChannelNumber(ch);
+            const old   = ctrl.channelConfig[ch];
+            const chNum = getChannelNumber(ch);
 
-            if (cfg.label !== undefined && cfg.label !== old.label)
-                await setLabelToMesskoffer(ctrl, chNum, newLabel);
-            if (cfg.schwellwert !== undefined && parseFloat(cfg.schwellwert) !== old.schwellwert)
-                await setThresholdToMesskoffer(ctrl, chNum, newSchwell);
-            if (cfg.hoechstwert !== undefined && parseFloat(cfg.hoechstwert) !== old.hoechstwert)
-                await setScaleendToMesskoffer(ctrl, chNum, newHoe);
+            const newLabel = (cfg.label !== undefined && String(cfg.label).trim() !== "")
+                ? String(cfg.label) : old.label;
+            const parsedS  = parseFloat(cfg.schwellwert);
+            const parsedH  = parseFloat(cfg.hoechstwert);
+            const newSchwell = !isNaN(parsedS) ? parsedS : old.schwellwert;
+            const newHoe     = !isNaN(parsedH) ? parsedH : old.hoechstwert;
 
-            const point = new Point("sensoren_config")
+            const labelChanged   = newLabel   !== old.label;
+            const schwellChanged = newSchwell !== old.schwellwert;
+            const hoeChanged     = newHoe     !== old.hoechstwert;
+            if (!labelChanged && !schwellChanged && !hoeChanged) continue;
+
+            if (labelChanged   && !(await setLabelToMesskoffer(ctrl, chNum, newLabel)))       cgiErrors.push(`${ch}: Label`);
+            if (schwellChanged && !(await setThresholdToMesskoffer(ctrl, chNum, newSchwell))) cgiErrors.push(`${ch}: Schwellwert`);
+            if (hoeChanged     && !(await setScaleendToMesskoffer(ctrl, chNum, newHoe)))      cgiErrors.push(`${ch}: Höchstwert`);
+
+            ctrl.channelConfig[ch] = { label: newLabel, schwellwert: newSchwell, hoechstwert: newHoe, updatedAt: Date.now() };
+
+            points.push(new Point("sensoren_config")
                 .tag("controller", ctrl.num)
                 .tag("channel", ch)
                 .tag("label",   newLabel)
                 .floatField("schwellwert", newSchwell)
                 .floatField("hoechstwert", newHoe)
-                .timestamp(new Date());
-            writeApi.writePoint(point);
-
-            ctrl.channelConfig[ch] = { label: newLabel, schwellwert: newSchwell, hoechstwert: newHoe, updatedAt: Date.now() };
+                .timestamp(new Date()));
         }
-        await writeApi.flush();
-
-        const result = {};
-        for (const ch of channelsList) {
-            result[ch] = {
-                label:       ctrl.channelConfig[ch].label,
-                schwellwert: ctrl.channelConfig[ch].schwellwert,
-                hoechstwert: ctrl.channelConfig[ch].hoechstwert
-            };
-        }
-        res.json({ success: true, config: result });
     } catch (err) {
-        console.error("[POST /config] Fehler:", err);
-        res.status(500).json({ error: err.message });
+        console.error(`[${ctrl.label} POST /config] Fehler:`, err);
+        return res.status(500).json({ error: err.message });
     }
+
+    // ✅ L'historique InfluxDB est secondaire : une erreur d'écriture ne doit
+    // plus faire échouer la sauvegarde (elle est seulement journalisée).
+    if (points.length > 0) {
+        try {
+            writeApi.writePoints(points);
+            await writeApi.flush();
+        } catch (err) {
+            console.error(`[${ctrl.label} POST /config] InfluxDB-Schreibfehler (ignoriert):`, err.message);
+        }
+    }
+
+    if (cgiErrors.length > 0) {
+        console.error(`[${ctrl.label} POST /config] CGI-Fehler:`, cgiErrors.join(", "));
+        return res.status(502).json({ success: false, error: `Messkoffer-Fehler: ${cgiErrors.join(", ")}`, config: configSnapshot(ctrl) });
+    }
+
+    res.json({ success: true, config: configSnapshot(ctrl) });
 });
 
 // ========== ROUTES ENERGIE ==========
@@ -487,7 +505,7 @@ app.get("/energy-values", async (req, res) => {
 app.post("/energy-values/set", async (req, res) => {
     const ctrl = getCtrl(req, res); if (!ctrl) return;
     const updates = req.body;
-    if (typeof updates !== "object") return res.status(400).json({ error: "JSON-Objekt erwartet" });
+    if (!updates || typeof updates !== "object") return res.status(400).json({ error: "JSON-Objekt erwartet" });
 
     try {
         for (const [ch, cfg] of Object.entries(updates)) {
@@ -500,7 +518,6 @@ app.post("/energy-values/set", async (req, res) => {
             ctrl.energyConfig[ch] = { temporary: newTemp, updatedAt: Date.now() };
         }
 
-        // Attendre 2s que le Messkoffer traite avant de relire
         await new Promise(resolve => setTimeout(resolve, 2000));
 
         const { temporary } = await getEnergiesFromMesskoffer(ctrl);
@@ -527,7 +544,7 @@ app.post("/energy-values/set", async (req, res) => {
     }
 });
 
-// ========== CALCUL S / Q via P et cosφ (valeurs BRUTES, avant ×10) ==========
+// ========== CALCUL S / Q ==========
 function computeApparentAndReactive(P, cosPhi) {
     if (P === null || P === undefined || isNaN(P)) return { S: null, Q: null };
     if (cosPhi === null || cosPhi === undefined || isNaN(cosPhi) || Math.abs(cosPhi) < 0.01) {
@@ -539,9 +556,6 @@ function computeApparentAndReactive(P, cosPhi) {
 }
 
 // ========== ROUTE DATA (Echtzeit) ==========
-// Source : measurement "mego4", Device = tag du contrôleur (ex. "mE180" / "mE180_2"),
-// filtré par Kanal=CHx ET Label=<label CGI actuel du canal>.
-
 app.get("/data", async (req, res) => {
     const ctrl = getCtrl(req, res); if (!ctrl) return;
     try {
@@ -559,8 +573,7 @@ app.get("/data", async (req, res) => {
             return `
                 from(bucket: "${INFLUX_BUCKET}")
                   |> range(start: -10m)
-                  |> filter(fn: (r) => r._measurement == "${mego4_MEASUREMENT}")
-                  |> filter(fn: (r) => r.Device == "${ctrl.device}")
+                  ${fluxSourceFilters(ctrl)}
                   |> filter(fn: (r) => r.Kanal  == "${ch}")
                   |> filter(fn: (r) => r.Label  == "${safeLabel}")
                   |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Leistungsfaktor")
@@ -584,7 +597,6 @@ app.get("/data", async (req, res) => {
                 else if (row._field === "Leistungsfaktor") influxData.CosinusPhi   = row._value;
             });
 
-            // index 0-5 -> phase 1, 6-11 -> phase 2, 12-17 -> phase 3
             const voltKanal = idx < 6 ? 1 : (idx < 12 ? 2 : 3);
             const U      = voltagesU[voltKanal] ?? null;
             const I      = influxData.Strom        ?? null;
@@ -618,7 +630,6 @@ app.get("/data", async (req, res) => {
 });
 
 // ========== ROUTE HISTORY ==========
-
 app.get("/history/:channel", async (req, res) => {
     const ctrl = getCtrl(req, res); if (!ctrl) return;
     const ch = req.params.channel;
@@ -635,8 +646,7 @@ app.get("/history/:channel", async (req, res) => {
     const fluxQuery = `
         from(bucket: "${INFLUX_BUCKET}")
           |> range(start: -${duration})
-          |> filter(fn: (r) => r._measurement == "${mego4_MEASUREMENT}")
-          |> filter(fn: (r) => r.Device == "${ctrl.device}")
+          ${fluxSourceFilters(ctrl)}
           |> filter(fn: (r) => r.Kanal  == "${ch}")
           |> filter(fn: (r) => r.Label  == "${safeLabel}")
           |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Leistungsfaktor" or r._field == "Energie")
@@ -679,7 +689,6 @@ app.get("/history/:channel", async (req, res) => {
 });
 
 // ========== ROUTE VOLTAGES ==========
-
 app.get("/voltages", async (req, res) => {
     const ctrl = getCtrl(req, res); if (!ctrl) return;
     try {
@@ -696,8 +705,7 @@ app.listen(4000, "0.0.0.0", () => {
     console.log("✅ Server läuft auf Port 4000");
     console.log(`   InfluxDB : ${INFLUX_URL} | Bucket: ${INFLUX_BUCKET}`);
     Object.values(CONTROLLERS).forEach(c =>
-        console.log(`   ${c.label}: ${c.ip} | ID: ${c.id} | Influx-Device: ${c.device}`)
+        console.log(`   [${c.num}] ${c.label}: ${c.ip} | ID: ${c.id} | Measurement: ${c.measurement} | Device: ${c.device || "(kein Filter)"}`)
     );
-    console.log(`   Kanäle: 18 pro Controller`);
-    console.log(`   Canaux ×10 (sauf CosinusPhi/Energie): ${CHANNELS_X10.join(", ")}`);
+    console.log(`   Canaux ×10: ${CHANNELS_X10.join(", ")}`);
 });

@@ -1,9 +1,6 @@
 // App_20sensors.jsx — adapté pour cascade Messkoffer + mapping CH→SensorN
-// ✅ Design harmonisé avec le portail principal mE2go (mêmes tokens de couleur,
-// même typographie, mêmes cartes à bordure fine sans ombre lourde, mêmes
-// pastilles de statut). Toute la logique métier de cette version (état, appels
-// API, décodage des labels, polling) est strictement inchangée — seul
-// l'habillage visuel a été repris.
+// ✅ Multi-contrôleur : le paramètre ?controller=1|2 de l'URL est transmis
+// automatiquement à TOUTES les requêtes vers le serveur (intercepteur axios).
 import React, { useEffect, useState, useCallback, memo } from "react";
 import axios from "axios";
 import { ThemeProvider, createTheme } from "@mui/material/styles";
@@ -32,6 +29,7 @@ import FilterListIcon from "@mui/icons-material/FilterList";
 import AccessTimeIcon from "@mui/icons-material/AccessTime";
 import UpdateIcon from "@mui/icons-material/Update";
 import SyncIcon from "@mui/icons-material/Sync";
+import MemoryIcon from "@mui/icons-material/Memory";
 import {
   LineChart, Line, XAxis, YAxis, Tooltip as RTooltip, Legend, CartesianGrid, ResponsiveContainer
 } from "recharts";
@@ -43,10 +41,8 @@ const SURFACE    = '#F3F5F7';
 const PANEL      = '#FFFFFF';
 const BORDER     = '#E3E6EB';
 const SUCCESS    = '#1E8A5D';
-const SUCCESS_BG = '#E7F5EE';
 const DANGER     = '#C0392B';
 const WARNING    = '#B7791F';
-const WARNING_BG = '#FBF1DE';
 const BRAND      = '#0a5e8c';
 const BRAND_BG   = '#E9F2F7';
 const ACCENT     = '#e67e22';
@@ -95,11 +91,24 @@ const theme = createTheme({
 const API_BASE_URL = `${window.location.protocol}//${window.location.hostname}:4000`;
 const STARTSEITE_URL = "http://192.168.1.20:8080";
 
-const formatChannelName  = (ch) => ch;
+// ✅ Contrôleur actif lu dans l'URL (?controller=1|2, 1 par défaut) et ajouté
+// automatiquement à chaque requête envoyée au serveur API.
+const CONTROLLER = new URLSearchParams(window.location.search).get("controller") || "1";
+axios.interceptors.request.use(cfg => {
+  if (typeof cfg.url === "string" && cfg.url.startsWith(API_BASE_URL)) {
+    cfg.params = { controller: CONTROLLER, ...(cfg.params || {}) };
+  }
+  return cfg;
+});
 
-// ✅ Rendu à deux tons (même style que le portail) : préfixe "CH" + numéro de
-// groupe en gris discret, lettre du canal en couleur marque et en gras.
-// Le nom du canal n'est PAS modifié (toujours "CH1 a", etc.).
+// ✅ Affichage par phase : "CH1 a" → "Ph1 a" (affichage uniquement ; les clés
+// envoyées au serveur restent "CH1 a").
+const formatChannelName  = (ch) => String(ch).replace(/^CH(\d+)\s+/i, "Ph$1 ");
+
+// ✅ Un label resté au nom par défaut ("CH1 a") s'affiche aussi en "Ph1 a".
+const displayLabel = (label) =>
+  typeof label === "string" && /^CH\d+\s+[a-r]$/i.test(label.trim()) ? formatChannelName(label.trim()) : label;
+
 const getChannelParts = (ch) => {
   const m = String(ch).match(/^CH(\d+)\s+([a-r])$/i);
   return m ? { group: m[1], letter: m[2] } : null;
@@ -110,17 +119,12 @@ const ChannelLabel = ({ channel, letterColor = BRAND }) => {
   if (!parts) return <>{formatChannelName(channel)}</>;
   return (
     <Box component="span" sx={{ display: "inline-flex", alignItems: "baseline", gap: "4px" }}>
-      <Box component="span" sx={{ color: INK_MUTED, fontWeight: 600, fontSize: "0.75em", letterSpacing: "0.3px" }}>CH{parts.group}</Box>
+      <Box component="span" sx={{ color: INK_MUTED, fontWeight: 600, fontSize: "0.75em", letterSpacing: "0.3px" }}>Ph{parts.group}</Box>
       <Box component="span" sx={{ color: letterColor, fontWeight: 800 }}>{parts.letter}</Box>
     </Box>
   );
 };
 
-// ✅ Décodage sûr des labels : certains labels remontent du backend sous forme
-// percent-encodée (ex. "Lüftung" → "L%FCftung") si l'encodage UTF-8 n'a pas été
-// respecté à l'enregistrement. On tente un decodeURIComponent uniquement si la
-// chaîne contient un "%" suivi de 2 caractères hexadécimaux ; sinon on la laisse
-// intacte pour ne jamais casser un label qui contient un "%" légitime (ex. "50%").
 const safeDecodeLabel = (str) => {
   if (typeof str !== "string" || str.length === 0) return str;
   if (!/%[0-9A-Fa-f]{2}/.test(str)) return str;
@@ -135,7 +139,6 @@ const safeDecodeLabel = (str) => {
   return str;
 };
 
-// ✅ Nommage des 18 canaux physiques — SECOURS si /config est injoignable.
 const DEFAULT_CHANNELS = [
   "CH1 a", "CH1 b", "CH1 c", "CH1 d", "CH1 e", "CH1 f",
   "CH2 g", "CH2 h", "CH2 i", "CH2 j", "CH2 k", "CH2 l",
@@ -175,7 +178,6 @@ const formatValue = (value, decimals = 3, unit = "") => {
   return `${safeNum.toFixed(decimals)}${unit ? " " + unit : ""}`;
 };
 
-// ─── Petit badge de valeur (chiffre en mono, cohérent avec le portail) ──────
 const ValueBadge = ({ children, muted = false }) => (
   <Box sx={{
     bgcolor: SURFACE, border: `1px solid ${BORDER}`, px: "10px", py: "3px", borderRadius: "8px",
@@ -187,7 +189,6 @@ const ValueBadge = ({ children, muted = false }) => (
   </Box>
 );
 
-// ─── En-tête de section (barre de couleur en haut + icône dans un carré arrondi) ──
 const SectionHeaderIcon = ({ Icon, color = BRAND, bg = BRAND_BG }) => (
   <Box sx={{ display: 'inline-flex', width: 44, height: 44, borderRadius: '12px', bgcolor: bg, alignItems: 'center', justifyContent: 'center' }}>
     <Icon sx={{ color, fontSize: 24 }} />
@@ -427,8 +428,6 @@ const GraphDetail = ({ selectedChannel, historyData, isMouseOverGraph, setIsMous
 };
 
 // ─── KANAL-KONFIGURATION ──────────────────────────────────────────────────────
-// ✅ Même habillage que le portail mE2go : tableau par groupe de 6 canaux,
-// fond de groupe nuancé, bordure fine, bouton "Alle speichern" vert en pilule.
 const ChannelConfigManager = () => {
   const [config, setConfig]           = useState({});
   const [loading, setLoading]         = useState(true);
@@ -443,16 +442,16 @@ const ChannelConfigManager = () => {
       const timeoutId  = setTimeout(() => controller.abort(), 5000);
       const res        = await axios.get(`${API_BASE_URL}/config`, { signal: controller.signal });
       clearTimeout(timeoutId);
-      // ✅ Décodage sûr des labels (voir safeDecodeLabel plus haut)
       const decoded = Object.fromEntries(
         Object.entries(res.data).map(([ch, cfg]) => [ch, { ...cfg, label: safeDecodeLabel(cfg?.label) }])
       );
       setConfig(decoded);
     } catch (err) {
       setMessageType("error");
-      setMessage(err.name === "AbortError"
+      const serverMsg = err.response?.data?.error;
+      setMessage(err.name === "AbortError" || err.name === "CanceledError"
         ? "❌ Zeitüberschreitung: Server antwortet nicht."
-        : "❌ Fehler beim Laden der Konfiguration: " + (err.message || "Netzwerkproblem"));
+        : "❌ Fehler beim Laden der Konfiguration: " + (serverMsg || err.message || "Netzwerkproblem"));
       setTimeout(() => setMessage(""), 5000);
     } finally { setLoading(false); }
   };
@@ -470,10 +469,11 @@ const ChannelConfigManager = () => {
       setMessage("✅ Konfiguration erfolgreich gespeichert");
       setTimeout(() => setMessage(""), 3000);
       await loadConfig();
-    } catch {
+    } catch (err) {
       setMessageType("error");
-      setMessage("❌ Fehler beim Speichern der Konfiguration");
-      setTimeout(() => setMessage(""), 3000);
+      const serverMsg = err.response?.data?.error;
+      setMessage("❌ Fehler beim Speichern der Konfiguration" + (serverMsg ? `: ${serverMsg}` : ""));
+      setTimeout(() => setMessage(""), 5000);
     } finally { setSaving(false); }
   };
 
@@ -481,9 +481,9 @@ const ChannelConfigManager = () => {
 
   const entries = Object.entries(config).filter(([key]) => !key.startsWith("L"));
   const groups  = [
-    { channels: entries.slice(0, 6),   bgColor: SURFACE,   title: "Kanäle A-F" },
-    { channels: entries.slice(6, 12),  bgColor: '#EEF1F4', title: "Kanäle G-L" },
-    { channels: entries.slice(12, 18), bgColor: '#F8F9FA', title: "Kanäle M-R" },
+    { channels: entries.slice(0, 6),   bgColor: SURFACE,   title: "Phase 1 · Kanäle a–f" },
+    { channels: entries.slice(6, 12),  bgColor: '#EEF1F4', title: "Phase 2 · Kanäle g–l" },
+    { channels: entries.slice(12, 18), bgColor: '#F8F9FA', title: "Phase 3 · Kanäle m–r" },
   ];
 
   return (
@@ -537,21 +537,6 @@ const ChannelConfigManager = () => {
   );
 };
 
-// ✅ Palette de couleurs, une par canal (CH1-CH18), utilisée dans Kanal Zähler
-// pour repérer visuellement chaque canal.
-const CHANNEL_COLOR_PALETTE = [
-  "#1976d2", "#2e7d32", "#e65100", "#6a1b9a", "#00838f", "#c2185b",
-  "#5d4037", "#455a64", "#f9a825", "#00695c", "#4527a0", "#ad1457",
-  "#37474f", "#6d4c41", "#0277bd", "#558b2f", "#ef6c00", "#8e24aa",
-];
-const getChannelColor = (channel) => {
-  const idx = DEFAULT_CHANNELS.indexOf(channel);
-  if (idx >= 0) return CHANNEL_COLOR_PALETTE[idx % CHANNEL_COLOR_PALETTE.length];
-  const num = parseInt(String(channel).replace(/\D/g, ""), 10);
-  if (isNaN(num)) return INK_MUTED;
-  return CHANNEL_COLOR_PALETTE[(num - 1) % CHANNEL_COLOR_PALETTE.length];
-};
-
 // ─── ENERGIE-MANAGER (Kanal Zähler) ───────────────────────────────────────────
 const EnergyManager = () => {
   const [energyData, setEnergyData]                         = useState({});
@@ -566,15 +551,15 @@ const EnergyManager = () => {
   const loadEnergyData = async () => {
     try {
       const res = await axios.get(`${API_BASE_URL}/energy-values`);
-      // ✅ Décodage sûr des labels reçus
       const decoded = Object.fromEntries(
         Object.entries(res.data).map(([ch, d]) => [ch, { ...d, label: safeDecodeLabel(d?.label) }])
       );
       setEnergyData(decoded);
       return decoded;
-    } catch {
+    } catch (err) {
       setMessageType("error");
-      setMessage("❌ Fehler beim Laden der Energiedaten");
+      const serverMsg = err.response?.data?.error;
+      setMessage("❌ Fehler beim Laden der Energiedaten" + (serverMsg ? `: ${serverMsg}` : ""));
       setTimeout(() => setMessage(""), 5000);
     } finally { setLoading(false); }
   };
@@ -639,35 +624,44 @@ const EnergyManager = () => {
   if (loading && Object.keys(energyData).length === 0)
     return <Typography sx={{ p: 3, color: INK_MUTED }}>Energiedaten werden geladen...</Typography>;
   if (!energyData || typeof energyData !== "object" || Object.keys(energyData).length === 0)
-    return <Typography sx={{ p: 3, color: INK_MUTED }}>Keine Daten verfügbar...</Typography>;
+    return (
+      <Box sx={{ p: 3 }}>
+        {message && <Alert severity="error" sx={{ mb: 2, borderRadius: 2 }}>{message}</Alert>}
+        <Typography sx={{ color: INK_MUTED }}>Keine Daten verfügbar...</Typography>
+      </Box>
+    );
 
   const entries       = Object.entries(energyData);
   const allChannels   = Object.keys(energyData);
   const selectedCount = selectedEnergyChannels.length;
   const totalCount    = allChannels.length;
   const groups        = [
-    { channels: entries.slice(0, 6),   bgColor: SURFACE,   title: "Kanäle A-F" },
-    { channels: entries.slice(6, 12),  bgColor: '#EEF1F4', title: "Kanäle G-L" },
-    { channels: entries.slice(12, 18), bgColor: '#F8F9FA', title: "Kanäle M-R" },
+    { channels: entries.slice(0, 6),   bgColor: SURFACE,   title: "Phase 1 · Kanäle a–f" },
+    { channels: entries.slice(6, 12),  bgColor: '#EEF1F4', title: "Phase 2 · Kanäle g–l" },
+    { channels: entries.slice(12, 18), bgColor: '#F8F9FA', title: "Phase 3 · Kanäle m–r" },
   ];
+
+  const thStyle = { padding: "12px", textAlign: "left", color: INK_MUTED, fontSize: '0.8rem' };
 
   return (
     <Paper elevation={0} sx={{ p: 3, mt: 3, bgcolor: PANEL }}>
+      {/* En-tête — identique à Kanal-Einstellungen */}
       <Box display="flex" justifyContent="space-between" alignItems="center" mb={2} flexWrap="wrap" gap={1}>
-        <Box display="flex" alignItems="center" gap={1}>
-          <BatteryChargingFullIcon sx={{ color: SUCCESS }} />
-          <Typography variant="h5" sx={{ color: INK }}>Kanal Zähler</Typography>
-        </Box>
-        <Button variant="outlined" onClick={loadEnergyData} startIcon={<UpdateIcon />} sx={{ borderColor: BORDER, color: INK, borderRadius: 20 }}>Aktualisieren</Button>
+        <Typography variant="h5" sx={{ color: INK }}>Kanal Zähler</Typography>
+        <Button variant="outlined" onClick={loadEnergyData} startIcon={<UpdateIcon />}
+          sx={{ borderColor: BORDER, color: INK, borderRadius: 20 }}>
+          Aktualisieren
+        </Button>
       </Box>
       {message && <Alert severity={messageType === "success" ? "success" : "error"} sx={{ mb: 2, borderRadius: 2 }}>{message}</Alert>}
 
-      <Paper elevation={0} sx={{ p: 2, mb: 3, bgcolor: SURFACE }}>
-        <Typography variant="subtitle1" sx={{ mb: 2, color: INK, fontWeight: 700 }}>Kanäle filtern / auswählen</Typography>
+      {/* Zählerstand setzen — même bloc que les groupes de canaux */}
+      <Box sx={{ mb: 3, p: 2, borderRadius: 2, backgroundColor: SURFACE, border: `1px solid ${BORDER}` }}>
+        <Typography variant="subtitle1" sx={{ mb: 1.5, color: INK, fontWeight: 700 }}>Zählerstand setzen</Typography>
         <Box display="flex" alignItems="center" gap={2} flexWrap="wrap">
           <Button variant="outlined" onClick={e => { e.stopPropagation(); setChannelAnchorEl(e.currentTarget); }}
-            endIcon={<span>▼</span>} sx={{ minWidth: 200, borderColor: BORDER, color: INK, bgcolor: PANEL }}>
-            {selectedCount === 0 ? "Keine Kanäle" : selectedCount === totalCount ? "Alle Kanäle" : `${selectedCount} Kanäle`}
+            endIcon={<span>▼</span>} sx={{ minWidth: 200, borderColor: BORDER, color: INK, bgcolor: PANEL, borderRadius: 20 }}>
+            {selectedCount === 0 ? "Kanäle wählen" : selectedCount === totalCount ? "Alle Kanäle" : `${selectedCount} Kanäle`}
           </Button>
           <Popover open={Boolean(channelAnchorEl)} anchorEl={channelAnchorEl}
             onClose={() => setChannelAnchorEl(null)}
@@ -680,19 +674,12 @@ const EnergyManager = () => {
               <Divider sx={{ my: 1 }} />
               <Box sx={{ maxHeight: 300, overflow: "auto" }}>
                 {allChannels.map(ch => {
-                  const chLabel = energyData[ch]?.label;
-                  const displayText = (chLabel && chLabel !== ch)
-                    ? <><ChannelLabel channel={ch} /> – {chLabel}</>
-                    : <ChannelLabel channel={ch} />;
+                  const chLabel   = displayLabel(energyData[ch]?.label);
+                  const showLabel = chLabel && chLabel !== formatChannelName(ch);
                   return (
                     <FormControlLabel key={ch}
                       control={<Checkbox checked={selectedEnergyChannels.includes(ch)} onChange={() => handleEnergyChannelToggle(ch)} />}
-                      label={
-                        <Box display="flex" alignItems="center" gap={1}>
-                          <Box sx={{ width: 8, height: 8, borderRadius: "50%", backgroundColor: getChannelColor(ch), flexShrink: 0 }} />
-                          <span>{displayText}</span>
-                        </Box>
-                      }
+                      label={<span><ChannelLabel channel={ch} />{showLabel ? <span style={{ color: INK_MUTED }}> – {chLabel}</span> : null}</span>}
                       sx={{ display: "block" }} />
                   );
                 })}
@@ -701,57 +688,60 @@ const EnergyManager = () => {
           </Popover>
           <TextField type="number" size="small" label="Wert (kWh)" value={globalEnergyValue}
             onChange={e => setGlobalEnergyValue(e.target.value)}
-            inputProps={{ step: "0.1", style: { width: 120 } }} sx={{ flex: 1, bgcolor: PANEL, borderRadius: 1 }} />
-          <Button variant="contained" onClick={sendGlobalEnergyValue}
+            inputProps={{ step: "0.1", style: { width: 120 } }} sx={{ bgcolor: PANEL, borderRadius: 1 }} />
+          <Button variant="contained" onClick={sendGlobalEnergyValue} startIcon={<SaveIcon />}
             disabled={loading || selectedEnergyChannels.length === 0 || globalEnergyValue === ""}
             sx={{ bgcolor: SUCCESS, boxShadow: 'none', borderRadius: 20, '&:hover': { bgcolor: '#166B48', boxShadow: 'none' } }}>
             Absenden
           </Button>
         </Box>
         <Typography variant="caption" sx={{ mt: 1, display: "block", color: INK_MUTED }}>
-          Wählen Sie Kanäle aus, geben Sie einen Wert ein und klicken Sie auf "Absenden".
+          Kanäle auswählen, Wert eingeben und „Absenden“ klicken.
         </Typography>
-      </Paper>
+      </Box>
 
+      {/* Tableaux par phase — même style que Kanal-Einstellungen */}
       {groups.map((group, idx) => (
         <Box key={idx} sx={{ mb: 3, p: 2, borderRadius: 2, backgroundColor: group.bgColor, border: `1px solid ${BORDER}`, overflowX: "auto" }}>
           <Typography variant="subtitle1" sx={{ mb: 1, color: INK, fontWeight: 700 }}>{group.title}</Typography>
           <table style={{ width: "100%", borderCollapse: "collapse", minWidth: isMobile ? 500 : "auto" }}>
             <thead>
               <tr style={{ backgroundColor: "rgba(17,24,39,0.04)" }}>
-                <th style={{ padding: "8px", textAlign: "left", color: INK_MUTED, fontSize: '0.8rem' }}>Kanal</th>
-                <th style={{ padding: "8px", textAlign: "left", color: INK_MUTED, fontSize: '0.8rem' }}>Bezeichnung</th>
-                <th style={{ padding: "8px", textAlign: "center", color: INK_MUTED, fontSize: '0.8rem' }}>Energie (kWh)</th>
-                <th style={{ padding: "8px", textAlign: "center", color: INK_MUTED, fontSize: '0.8rem' }}>Letzte Änderung</th>
+                <th style={thStyle}>Kanal</th>
+                <th style={thStyle}>Bezeichnung</th>
+                <th style={thStyle}>Energie (kWh)</th>
+                <th style={thStyle}>Letzte Änderung</th>
               </tr>
             </thead>
             <tbody>
               {group.channels.map(([channel, data_]) => {
                 const isSelected  = selectedEnergyChannels.includes(channel);
                 const lastUpdated = data_?.updatedAt ? new Date(data_.updatedAt) : null;
+                const validDate   = lastUpdated && !isNaN(lastUpdated.getTime());
                 return (
-                  <tr key={channel} style={{ borderBottom: `1px solid ${BORDER}`, borderLeft: `4px solid ${getChannelColor(channel)}`, backgroundColor: isSelected ? SUCCESS_BG : "transparent" }}>
-                    <td style={{ padding: "8px", fontWeight: 700, fontFamily: MONO_FONT, color: INK }}>
-                      <Box display="flex" alignItems="center" gap={1}>
-                        <Box sx={{ width: 10, height: 10, borderRadius: "50%", backgroundColor: getChannelColor(channel), flexShrink: 0 }} />
-                        <ChannelLabel channel={channel} />
+                  <tr key={channel} style={{ borderBottom: `1px solid ${BORDER}`, backgroundColor: isSelected ? BRAND_BG : "transparent" }}>
+                    <td style={{ padding: "8px", fontWeight: 700, fontFamily: MONO_FONT }}><ChannelLabel channel={channel} /></td>
+                    <td style={{ padding: "8px" }}>
+                      <Box sx={{ px: 1.5, py: 1, bgcolor: PANEL, border: `1px solid ${BORDER}`, borderRadius: 1 }}>
+                        <Typography sx={{ color: INK, fontSize: "1rem", fontWeight: 600 }}>
+                          {displayLabel(data_?.label) || formatChannelName(channel)}
+                        </Typography>
                       </Box>
                     </td>
                     <td style={{ padding: "8px" }}>
-                      <Typography variant="body2" sx={{ fontWeight: 600, color: INK }}>{data_?.label || <ChannelLabel channel={channel} />}</Typography>
+                      <Box sx={{ px: 1.5, py: 1, bgcolor: PANEL, border: `1px solid ${BORDER}`, borderRadius: 1, minWidth: isMobile ? 90 : 120, textAlign: "right" }}>
+                        <Typography sx={{ fontFamily: MONO_FONT, fontWeight: 700, color: INK }}>
+                          {(data_?.temporary || 0).toFixed(2)}
+                        </Typography>
+                      </Box>
                     </td>
-                    <td style={{ padding: "8px", textAlign: "center" }}>
-                      <Typography variant="body2" sx={{ fontWeight: 700, color: ACCENT, fontFamily: MONO_FONT }}>
-                        {(data_?.temporary || 0).toFixed(2)} kWh
-                      </Typography>
-                    </td>
-                    <td style={{ padding: "8px", textAlign: "center", fontSize: "0.75rem" }}>
-                      {lastUpdated && !isNaN(lastUpdated.getTime()) ? (
-                        <>
-                          <Typography variant="caption" component="div" sx={{ color: INK }}>{lastUpdated.toLocaleDateString()}</Typography>
-                          <Typography variant="caption" component="div" sx={{ color: INK_MUTED }}>{lastUpdated.toLocaleTimeString()}</Typography>
-                        </>
-                      ) : <Typography variant="caption" sx={{ color: INK_MUTED }}>—</Typography>}
+                    <td style={{ padding: "8px" }}>
+                      {validDate ? (
+                        <Box>
+                          <Typography variant="body2" sx={{ color: INK, fontFamily: MONO_FONT }}>{lastUpdated.toLocaleDateString()}</Typography>
+                          <Typography variant="caption" sx={{ color: INK_MUTED, fontFamily: MONO_FONT }}>{lastUpdated.toLocaleTimeString()}</Typography>
+                        </Box>
+                      ) : <Typography variant="body2" sx={{ color: INK_MUTED }}>—</Typography>}
                     </td>
                   </tr>
                 );
@@ -779,7 +769,6 @@ const MAPPING_METRIC_LABELS = {
 };
 const KANAL_LABELS = { "1": "L1", "2": "L2", "3": "L3", "4": "N" };
 const KANAL_OPTIONS = ["1", "2", "3", "4"];
-// Kanal 1 = Braun, Kanal 2 = Schwarz, Kanal 3 = Grau, Kanal 4 = Blau.
 const KANAL_COLORS = { "1": "#795548", "2": "#000000", "3": "#757575", "4": "#1976d2" };
 
 // ─── MAPPING DETAIL ───────────────────────────────────────────────────────────
@@ -877,7 +866,6 @@ const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
           sx={{ bgcolor: SURFACE, color: INK_MUTED }} />
       </Paper>
 
-      {/* Résumé des valeurs actuelles — lecteurs mono foncés */}
       <Box display="flex" gap={2} sx={{ mb: 2, flexWrap: "wrap" }}>
         {MAPPING_METRIC_OPTIONS.map(m => (
           <Paper key={m.value} elevation={0} sx={{ flex: 1, minWidth: 150, p: 0, textAlign: "center", overflow: 'hidden', bgcolor: PANEL }}>
@@ -1157,12 +1145,23 @@ function AppContent() {
   const [isMouseOverGraph, setIsMouseOverGraph]             = useState(false);
   const [orderedChannels, setOrderedChannels]               = useState([]);
   const [voltages, setVoltages]                             = useState({ L1: 0, L2: 0, L3: 0 });
+  const [controllerLabel, setControllerLabel]               = useState(`Controller ${CONTROLLER}`);
   const isMobile = useMediaQuery("(max-width:600px)");
 
   useEffect(() => {
     const params    = new URLSearchParams(window.location.search);
     const viewParam = params.get("view");
     if (["config", "graphMenu", "dashboard", "energy", "mapping"].includes(viewParam)) setView(viewParam);
+  }, []);
+
+  // ✅ Nom du contrôleur actif (affiché dans la barre de navigation)
+  useEffect(() => {
+    axios.get(`${API_BASE_URL}/controllers`)
+      .then(res => {
+        const c = (res.data || []).find(x => String(x.num) === String(CONTROLLER));
+        if (c?.label) setControllerLabel(c.label);
+      })
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -1206,7 +1205,7 @@ function AppContent() {
     if (view !== "graphDetail" || !selectedChannel || isMouseOverGraph) return;
     const update = async () => {
       try {
-        const res = await axios.get(`${API_BASE_URL}/history/${encodeURIComponent(selectedChannel)}?time=${timeRange}`);
+        const res = await axios.get(`${API_BASE_URL}/history/${encodeURIComponent(selectedChannel)}`, { params: { time: timeRange } });
         if (res.data?.data) setHistoryData(res.data.data);
       } catch (err) { console.error("Erreur historique:", err); }
     };
@@ -1243,6 +1242,8 @@ function AppContent() {
         <Box display="flex" alignItems="center" gap={1}>
           <DashboardIcon sx={{ color: BRAND }} />
           <Typography variant="h6" sx={{ fontSize: isMobile ? "1rem" : "1.25rem", color: INK }}>Energy Monitor</Typography>
+          <Chip size="small" icon={<MemoryIcon sx={{ fontSize: '14px !important', color: `${BRAND} !important` }} />}
+            label={controllerLabel} sx={{ bgcolor: BRAND_BG, color: BRAND, ml: 1 }} />
         </Box>
         <Box display="flex" gap={1}>
           {[
@@ -1286,7 +1287,7 @@ function AppContent() {
   // ── Channel Card ──
   const ChannelCard = ({ channel, useTrendFilter = false }) => {
     const channelData = data[channel] || {};
-    const label       = channelData.Label || channel;
+    const label       = displayLabel(channelData.Label) || formatChannelName(channel);
     const hasVisible  = METRIC_OPTIONS.some(m => useTrendFilter ? shouldShowTrendMetric(m.value) : shouldShowMetric(m.value));
     if (!hasVisible) return null;
     return (
@@ -1348,7 +1349,6 @@ function AppContent() {
           </Box>
         </Paper>
 
-        {/* Spannungen — lecteurs mono foncés */}
         <Box display="flex" gap={2} sx={{ mb: "25px", flexDirection: isMobile ? "column" : "row" }}>
           {[{ phase: "Phase 1", voltage: voltages.L1, label: "Spannung L1" },
             { phase: "Phase 2", voltage: voltages.L2, label: "Spannung L2" },
@@ -1387,7 +1387,7 @@ function AppContent() {
 
     const ChannelGraphCard = ({ channel }) => {
       const channelData = data[channel] || {};
-      const label = channelData.Label || channel;
+      const label = displayLabel(channelData.Label) || formatChannelName(channel);
       if (!shouldShowTrendChannel(channel)) return null;
       return (
         <Paper elevation={0} onClick={() => handleOpenGraph(channel)}
