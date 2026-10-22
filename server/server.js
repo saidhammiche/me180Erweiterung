@@ -81,6 +81,20 @@ function fluxSourceFilters(ctrl) {
     return f;
 }
 
+// ========== NOMBRES (positifs ET négatifs) ==========
+// ✅ Vrai pour tout nombre réel, y compris 0 et les valeurs négatives.
+const isNum = (v) => typeof v === "number" && Number.isFinite(v);
+
+// ✅ Parse une valeur brute du Messkoffer : "-1675063200", " -1675063200 ",
+// "-167506,32" … Renvoie null si ce n'est pas un nombre.
+function parseMesskofferNumber(raw) {
+    if (raw === undefined || raw === null) return null;
+    const s = String(raw).trim().replace(/[\u2212\u2013]/g, "-").replace(/\s+/g, "").replace(",", ".");
+    if (s === "") return null;
+    const n = parseFloat(s);
+    return Number.isFinite(n) ? n : null;
+}
+
 // ========== KANÄLE ==========
 const channelsList = [
     "CH1 a", "CH1 b", "CH1 c", "CH1 d", "CH1 e", "CH1 f",
@@ -256,6 +270,9 @@ async function setThresholdToMesskoffer(ctrl, channelNum, valueAmps) {
     }
 }
 
+// ✅ Les valeurs négatives sont conservées. Une valeur illisible n'est plus
+// remplacée par 0 : le canal est simplement absent, ce qui permet aux routes
+// d'utiliser la dernière valeur connue.
 async function getEnergiesFromMesskoffer(ctrl) {
     const url = `http://${ctrl.ip}/get_energy_values.cgi?id=${ctrl.id}`;
     try {
@@ -263,9 +280,10 @@ async function getEnergiesFromMesskoffer(ctrl) {
         const raw = res.data;
         const temporary = {};
         if (typeof raw === "string") {
-            const values = raw.split(";").map(v => parseFloat(v));
+            const values = raw.split(";");
             for (let i = 0; i < 18; i++) {
-                temporary[channelsList[i]] = (values[19 + i] || 0) / 10000;
+                const v = parseMesskofferNumber(values[19 + i]);
+                if (v !== null) temporary[channelsList[i]] = v / 10000;
             }
         }
         return { temporary };
@@ -383,6 +401,24 @@ app.get("/messkoffer/threshold", async (req, res) => {
     res.json(thresholds);
 });
 
+// ✅ Diagnostic : réponse brute du Messkoffer pour les énergies
+//    GET /messkoffer/energy-raw?controller=1
+app.get("/messkoffer/energy-raw", async (req, res) => {
+    const ctrl = getCtrl(req, res); if (!ctrl) return;
+    try {
+        const r = await axios.get(`http://${ctrl.ip}/get_energy_values.cgi?id=${ctrl.id}`, { timeout: 5000 });
+        const parts = typeof r.data === "string" ? r.data.split(";") : [];
+        const perChannel = {};
+        for (let i = 0; i < 18; i++) {
+            const v = parseMesskofferNumber(parts[19 + i]);
+            perChannel[channelsList[i]] = { raw: parts[19 + i] ?? null, kWh: v === null ? null : v / 10000 };
+        }
+        res.json({ raw: r.data, perChannel });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 app.post("/messkoffer/reload", async (req, res) => {
     const ctrl = getCtrl(req, res); if (!ctrl) return;
     await initConfigFromMesskoffer(ctrl, 3000, 1);
@@ -425,10 +461,10 @@ app.post("/config", async (req, res) => {
 
             const newLabel = (cfg.label !== undefined && String(cfg.label).trim() !== "")
                 ? String(cfg.label) : old.label;
-            const parsedS  = parseFloat(cfg.schwellwert);
-            const parsedH  = parseFloat(cfg.hoechstwert);
-            const newSchwell = !isNaN(parsedS) ? parsedS : old.schwellwert;
-            const newHoe     = !isNaN(parsedH) ? parsedH : old.hoechstwert;
+            const parsedS  = parseMesskofferNumber(cfg.schwellwert);
+            const parsedH  = parseMesskofferNumber(cfg.hoechstwert);
+            const newSchwell = parsedS !== null ? parsedS : old.schwellwert;
+            const newHoe     = parsedH !== null ? parsedH : old.hoechstwert;
 
             const labelChanged   = newLabel   !== old.label;
             const schwellChanged = newSchwell !== old.schwellwert;
@@ -483,7 +519,8 @@ app.get("/energy-values", async (req, res) => {
         const result = {};
         for (const ch of channelsList) {
             const previous  = ctrl.energyConfig[ch] || { temporary: 0, updatedAt: 0 };
-            const newTemp   = temporary[ch] ?? previous.temporary ?? 0;
+            // ✅ Négatif ou zéro acceptés ; dernière valeur connue seulement si illisible
+            const newTemp   = isNum(temporary[ch]) ? temporary[ch] : (previous.temporary ?? 0);
             const changed   = hasEnergyChanged(newTemp, previous.temporary);
             const updatedAt = changed ? Date.now() : previous.updatedAt;
 
@@ -509,13 +546,14 @@ app.post("/energy-values/set", async (req, res) => {
 
     try {
         for (const [ch, cfg] of Object.entries(updates)) {
-            if (!channelsList.includes(ch)) continue;
-            const oldTemp = ctrl.energyConfig[ch]?.temporary || 0;
-            const newTemp = cfg.temporary !== undefined ? parseFloat(cfg.temporary) : oldTemp;
-            if (!hasEnergyChanged(newTemp, oldTemp)) continue;
+            if (!channelsList.includes(ch) || !cfg || typeof cfg !== "object") continue;
+            const oldTemp = ctrl.energyConfig[ch]?.temporary ?? 0;
+            const parsed  = parseMesskofferNumber(cfg.temporary);
+            if (parsed === null) continue;                       // ✅ valeur invalide ignorée
+            if (!hasEnergyChanged(parsed, oldTemp)) continue;
 
-            await setEnergyToMesskoffer(ctrl, getChannelNumber(ch), newTemp);
-            ctrl.energyConfig[ch] = { temporary: newTemp, updatedAt: Date.now() };
+            await setEnergyToMesskoffer(ctrl, getChannelNumber(ch), parsed);
+            ctrl.energyConfig[ch] = { temporary: parsed, updatedAt: Date.now() };
         }
 
         await new Promise(resolve => setTimeout(resolve, 2000));
@@ -524,9 +562,8 @@ app.post("/energy-values/set", async (req, res) => {
         const result = {};
         for (const ch of channelsList) {
             const previous = ctrl.energyConfig[ch] || { temporary: 0, updatedAt: 0 };
-            const confirmedTemp = (temporary[ch] && temporary[ch] > 0)
-                ? temporary[ch]
-                : previous.temporary ?? 0;
+            // ✅ Avant : "temporary[ch] > 0" → toute valeur négative était ignorée
+            const confirmedTemp = isNum(temporary[ch]) ? temporary[ch] : (previous.temporary ?? 0);
             const changed   = hasEnergyChanged(confirmedTemp, previous.temporary);
             const updatedAt = changed ? Date.now() : previous.updatedAt;
 
@@ -604,11 +641,18 @@ app.get("/data", async (req, res) => {
             const cosPhi = influxData.CosinusPhi   ?? null;
             const { S, Q } = computeApparentAndReactive(P, cosPhi);
 
-            const rawEnergie = (messeEnergy[ch] && messeEnergy[ch] > 0)
-                ? messeEnergy[ch]
-                : (ctrl.energyConfig[ch]?.temporary && ctrl.energyConfig[ch].temporary > 0)
-                ? ctrl.energyConfig[ch].temporary
-                : null;
+            // ✅ Avant : "> 0" des deux côtés → une énergie négative devenait null (affichée 0).
+            // Maintenant : valeur du Messkoffer (même négative), sinon dernière valeur connue.
+            const cached = ctrl.energyConfig[ch];
+            let rawEnergie = null;
+            if (isNum(messeEnergy[ch])) {
+                rawEnergie = messeEnergy[ch];
+                if (cached && hasEnergyChanged(rawEnergie, cached.temporary)) {
+                    ctrl.energyConfig[ch] = { temporary: rawEnergie, updatedAt: Date.now() };
+                }
+            } else if (cached && cached.updatedAt > 0 && isNum(cached.temporary)) {
+                rawEnergie = cached.temporary;
+            }
 
             result[ch] = {
                 Label:          ctrl.channelConfig[ch]?.label || ch,

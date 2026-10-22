@@ -1,6 +1,9 @@
 // App_20sensors.jsx — adapté pour cascade Messkoffer + mapping CH→SensorN
 // ✅ Multi-contrôleur : le paramètre ?controller=1|2 de l'URL est transmis
 // automatiquement à TOUTES les requêtes vers le serveur (intercepteur axios).
+// ✅ Valeurs négatives : affichage correct (signe conservé, pas de "-0.000"),
+// mise en évidence couleur, saisie possible dans les champs numériques,
+// axe Y des graphiques étendu sous zéro avec une ligne de référence à 0.
 import React, { useEffect, useState, useCallback, memo } from "react";
 import axios from "axios";
 import { ThemeProvider, createTheme } from "@mui/material/styles";
@@ -31,7 +34,7 @@ import UpdateIcon from "@mui/icons-material/Update";
 import SyncIcon from "@mui/icons-material/Sync";
 import MemoryIcon from "@mui/icons-material/Memory";
 import {
-  LineChart, Line, XAxis, YAxis, Tooltip as RTooltip, Legend, CartesianGrid, ResponsiveContainer
+  LineChart, Line, XAxis, YAxis, Tooltip as RTooltip, Legend, CartesianGrid, ResponsiveContainer, ReferenceLine
 } from "recharts";
 
 // =================== DESIGN-TOKENS (identisch zum mE2go-Hauptportal) ===================
@@ -48,6 +51,12 @@ const BRAND_BG   = '#E9F2F7';
 const ACCENT     = '#e67e22';
 const ACCENT_BG  = '#FCEEE0';
 const READOUT_BG = '#0d141b';
+const READOUT_FG = '#7CC7E8';
+// ✅ Couleurs pour les valeurs négatives
+const NEGATIVE         = '#B42318';
+const NEGATIVE_BG      = '#FEF3F2';
+const NEGATIVE_BORDER  = '#FDA29B';
+const NEGATIVE_READOUT = '#F97066';
 const MONO_FONT    = '"IBM Plex Mono","JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace';
 const DISPLAY_FONT = '"IBM Plex Sans","Inter","Segoe UI", sans-serif';
 
@@ -172,18 +181,57 @@ const TIME_RANGE_OPTIONS = [
   { value: "24h", label: "letzte 24 Stunden" },
 ];
 
+// ─── GESTION DES NOMBRES (positifs ET négatifs) ───────────────────────────────
+// ✅ Convertit n'importe quelle valeur reçue (nombre, "-3.5", "-3,5", "−3.5")
+// en nombre, ou null si ce n'est pas un nombre valide.
+const toNumber = (value) => {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  const cleaned = String(value).trim().replace(/\u2212/g, "-").replace(",", ".");
+  const num = parseFloat(cleaned);
+  return Number.isFinite(num) ? num : null;
+};
+
+// ✅ Vrai uniquement si la valeur, arrondie à l'affichage, est strictement négative
+// (évite de colorer "-0.000" en rouge).
+const isNegativeValue = (value, decimals = 3) => {
+  const num = toNumber(value);
+  if (num === null) return false;
+  return Number(num.toFixed(decimals)) < 0;
+};
+
+// ✅ Conserve le signe "-" et supprime le "-0.000" parasite.
 const formatValue = (value, decimals = 3, unit = "") => {
-  const num = (value === undefined || value === null) ? 0 : parseFloat(value);
-  const safeNum = isNaN(num) ? 0 : num;
+  const num = toNumber(value);
+  let safeNum = num === null ? 0 : num;
+  if (Number(safeNum.toFixed(decimals)) === 0) safeNum = 0; // -0.0001 → 0.000
   return `${safeNum.toFixed(decimals)}${unit ? " " + unit : ""}`;
 };
 
-const ValueBadge = ({ children, muted = false }) => (
+// ✅ Normalise l'historique : toutes les valeurs numériques (y compris
+// négatives envoyées en texte) deviennent de vrais nombres pour Recharts.
+const normalizeHistory = (points) =>
+  (Array.isArray(points) ? points : []).map(p => {
+    const out = { ...p };
+    for (const [k, v] of Object.entries(p)) {
+      if (k === "time") continue;
+      const n = toNumber(v);
+      if (n !== null) out[k] = n;
+    }
+    return out;
+  });
+
+// ✅ Saisie : autorise un nombre partiel en cours de frappe ("-", "-1.", "2,5").
+const NUMBER_INPUT_PATTERN = /^-?\d*([.,]\d*)?$/;
+
+const ValueBadge = ({ children, muted = false, negative = false }) => (
   <Box sx={{
-    bgcolor: SURFACE, border: `1px solid ${BORDER}`, px: "10px", py: "3px", borderRadius: "8px",
+    bgcolor: negative ? NEGATIVE_BG : SURFACE,
+    border: `1px solid ${negative ? NEGATIVE_BORDER : BORDER}`,
+    px: "10px", py: "3px", borderRadius: "8px",
     minWidth: 92, textAlign: "center"
   }}>
-    <Typography variant="caption" sx={{ fontFamily: MONO_FONT, fontWeight: 700, color: muted ? INK_MUTED : INK }}>
+    <Typography variant="caption" sx={{ fontFamily: MONO_FONT, fontWeight: 700, color: negative ? NEGATIVE : muted ? INK_MUTED : INK }}>
       {children}
     </Typography>
   </Box>
@@ -194,6 +242,18 @@ const SectionHeaderIcon = ({ Icon, color = BRAND, bg = BRAND_BG }) => (
     <Icon sx={{ color, fontSize: 24 }} />
   </Box>
 );
+
+// ✅ Axe Y et tooltip communs aux deux graphiques (gèrent les valeurs < 0)
+const chartYAxisProps = (labelText) => ({
+  domain: ["auto", "auto"],
+  allowDataOverflow: false,
+  tick: { fontSize: 11, fill: INK_MUTED },
+  axisLine: { stroke: BORDER, strokeWidth: 1 },
+  label: { value: labelText, angle: -90, position: "insideLeft",
+    style: { textAnchor: "middle", fill: INK_MUTED, fontSize: 12 } },
+});
+
+const hasNegativeData = (data, key) => data.some(p => typeof p[key] === "number" && p[key] < 0);
 
 // ─── FILTER BAR ───────────────────────────────────────────────────────────────
 const FilterBar = memo(({
@@ -409,9 +469,10 @@ const GraphDetail = ({ selectedChannel, historyData, isMouseOverGraph, setIsMous
               <CartesianGrid stroke={BORDER} strokeDasharray="5 5" />
               <XAxis dataKey="time" tickFormatter={formatXAxis} angle={-30} textAnchor="end" height={60}
                 tick={{ fontSize: 11, fill: INK_MUTED }} axisLine={{ stroke: BORDER, strokeWidth: 1 }} />
-              <YAxis tick={{ fontSize: 11, fill: INK_MUTED }} axisLine={{ stroke: BORDER, strokeWidth: 1 }}
-                label={{ value: METRIC_LABELS[selectedMetric], angle: -90, position: "insideLeft",
-                  style: { textAnchor: "middle", fill: INK_MUTED, fontSize: 12 } }} />
+              <YAxis {...chartYAxisProps(METRIC_LABELS[selectedMetric])} />
+              {hasNegativeData(historyData, selectedMetric) && (
+                <ReferenceLine y={0} stroke={INK_MUTED} strokeWidth={1.5} />
+              )}
               <RTooltip labelFormatter={t => new Date(t).toLocaleString()}
                 wrapperStyle={{ pointerEvents: "auto" }}
                 contentStyle={{ backgroundColor: PANEL, border: `1px solid ${BORDER}`, borderRadius: 8, fontSize: 12 }} />
@@ -461,10 +522,23 @@ const ChannelConfigManager = () => {
   const handleChange = (channel, field, value) =>
     setConfig(prev => ({ ...prev, [channel]: { ...prev[channel], [field]: value } }));
 
+  // ✅ Garde le texte tel que tapé ("-", "-1.") pour pouvoir saisir un négatif ;
+  // la conversion en nombre se fait à l'enregistrement.
+  const handleNumberChange = (channel, field, raw) => {
+    if (raw === "" || NUMBER_INPUT_PATTERN.test(raw)) handleChange(channel, field, raw);
+  };
+
   const saveConfig = async () => {
     setSaving(true);
     try {
-      await axios.post(`${API_BASE_URL}/config`, config);
+      const payload = Object.fromEntries(
+        Object.entries(config).map(([ch, cfg]) => [ch, {
+          ...cfg,
+          ...(cfg && "schwellwert" in cfg ? { schwellwert: toNumber(cfg.schwellwert) ?? 0 } : {}),
+          ...(cfg && "hoechstwert" in cfg ? { hoechstwert: toNumber(cfg.hoechstwert) ?? 0 } : {}),
+        }])
+      );
+      await axios.post(`${API_BASE_URL}/config`, payload);
       setMessageType("success");
       setMessage("✅ Konfiguration erfolgreich gespeichert");
       setTimeout(() => setMessage(""), 3000);
@@ -485,6 +559,16 @@ const ChannelConfigManager = () => {
     { channels: entries.slice(6, 12),  bgColor: '#EEF1F4', title: "Phase 2 · Kanäle g–l" },
     { channels: entries.slice(12, 18), bgColor: '#F8F9FA', title: "Phase 3 · Kanäle m–r" },
   ];
+
+  const numberField = (channel, field, value) => {
+    const negative = isNegativeValue(value, 6);
+    return (
+      <TextField size="small" value={value ?? ""}
+        onChange={e => handleNumberChange(channel, field, e.target.value)}
+        variant="outlined"
+        inputProps={{ inputMode: "decimal", style: { width: isMobile ? 80 : 100, fontFamily: MONO_FONT, color: negative ? NEGATIVE : INK } }} />
+    );
+  };
 
   return (
     <Paper elevation={0} sx={{ p: 3, mt: 3, bgcolor: PANEL }}>
@@ -517,16 +601,8 @@ const ChannelConfigManager = () => {
                       fullWidth variant="outlined"
                       InputProps={{ style: { color: INK, fontSize: "1rem", fontWeight: 600, backgroundColor: PANEL } }} />
                   </td>
-                  <td style={{ padding: "8px" }}>
-                    <TextField type="number" size="small" value={cfg.schwellwert || 0}
-                      onChange={e => handleChange(channel, "schwellwert", parseFloat(e.target.value) || 0)}
-                      variant="outlined" inputProps={{ step: "0.1", style: { width: isMobile ? 80 : 100 } }} />
-                  </td>
-                  <td style={{ padding: "8px" }}>
-                    <TextField type="number" size="small" value={cfg.hoechstwert || 0}
-                      onChange={e => handleChange(channel, "hoechstwert", parseFloat(e.target.value) || 0)}
-                      variant="outlined" inputProps={{ step: "0.1", style: { width: isMobile ? 80 : 100 } }} />
-                  </td>
+                  <td style={{ padding: "8px" }}>{numberField(channel, "schwellwert", cfg.schwellwert)}</td>
+                  <td style={{ padding: "8px" }}>{numberField(channel, "hoechstwert", cfg.hoechstwert)}</td>
                 </tr>
               ))}
             </tbody>
@@ -578,10 +654,11 @@ const EnergyManager = () => {
   const handleEnergyChannelToggle = ch =>
     setSelectedEnergyChannels(prev => prev.includes(ch) ? prev.filter(c => c !== ch) : [...prev, ch]);
 
+  // ✅ Valeurs négatives acceptées (ex. énergie réinjectée)
   const sendGlobalEnergyValue = async () => {
-    const value = parseFloat(globalEnergyValue);
-    if (isNaN(value) || value < 0) {
-      setMessageType("error"); setMessage("❌ Ungültiger Wert (muss ≥ 0 sein)");
+    const value = toNumber(globalEnergyValue);
+    if (value === null) {
+      setMessageType("error"); setMessage("❌ Ungültiger Wert (Zahl erwartet, z. B. 12.5 oder -3.2)");
       setTimeout(() => setMessage(""), 3000); return;
     }
     if (selectedEnergyChannels.length === 0) {
@@ -612,7 +689,7 @@ const EnergyManager = () => {
 
     setMessageType(errorCount === 0 ? "success" : "error");
     setMessage(errorCount === 0
-      ? `✅ ${successCount} Kanäle auf ${value.toFixed(2)} kWh gesetzt`
+      ? `✅ ${successCount} Kanäle auf ${formatValue(value, 2, "kWh")} gesetzt`
       : `⚠️ ${successCount} OK, ${errorCount} Fehler`);
     setTimeout(() => setMessage(""), 3000);
 
@@ -642,6 +719,7 @@ const EnergyManager = () => {
   ];
 
   const thStyle = { padding: "12px", textAlign: "left", color: INK_MUTED, fontSize: '0.8rem' };
+  const inputNegative = isNegativeValue(globalEnergyValue, 6);
 
   return (
     <Paper elevation={0} sx={{ p: 3, mt: 3, bgcolor: PANEL }}>
@@ -686,17 +764,18 @@ const EnergyManager = () => {
               </Box>
             </Box>
           </Popover>
-          <TextField type="number" size="small" label="Wert (kWh)" value={globalEnergyValue}
-            onChange={e => setGlobalEnergyValue(e.target.value)}
-            inputProps={{ step: "0.1", style: { width: 120 } }} sx={{ bgcolor: PANEL, borderRadius: 1 }} />
+          <TextField size="small" label="Wert (kWh)" value={globalEnergyValue}
+            onChange={e => { const v = e.target.value; if (v === "" || NUMBER_INPUT_PATTERN.test(v)) setGlobalEnergyValue(v); }}
+            inputProps={{ inputMode: "decimal", style: { width: 120, fontFamily: MONO_FONT, color: inputNegative ? NEGATIVE : INK } }}
+            sx={{ bgcolor: PANEL, borderRadius: 1 }} />
           <Button variant="contained" onClick={sendGlobalEnergyValue} startIcon={<SaveIcon />}
-            disabled={loading || selectedEnergyChannels.length === 0 || globalEnergyValue === ""}
+            disabled={loading || selectedEnergyChannels.length === 0 || toNumber(globalEnergyValue) === null}
             sx={{ bgcolor: SUCCESS, boxShadow: 'none', borderRadius: 20, '&:hover': { bgcolor: '#166B48', boxShadow: 'none' } }}>
             Absenden
           </Button>
         </Box>
         <Typography variant="caption" sx={{ mt: 1, display: "block", color: INK_MUTED }}>
-          Kanäle auswählen, Wert eingeben und „Absenden“ klicken.
+          Kanäle auswählen, Wert eingeben (auch negativ, z. B. -3.2) und „Absenden“ klicken.
         </Typography>
       </Box>
 
@@ -718,6 +797,7 @@ const EnergyManager = () => {
                 const isSelected  = selectedEnergyChannels.includes(channel);
                 const lastUpdated = data_?.updatedAt ? new Date(data_.updatedAt) : null;
                 const validDate   = lastUpdated && !isNaN(lastUpdated.getTime());
+                const negative    = isNegativeValue(data_?.temporary, 2);
                 return (
                   <tr key={channel} style={{ borderBottom: `1px solid ${BORDER}`, backgroundColor: isSelected ? BRAND_BG : "transparent" }}>
                     <td style={{ padding: "8px", fontWeight: 700, fontFamily: MONO_FONT }}><ChannelLabel channel={channel} /></td>
@@ -729,9 +809,9 @@ const EnergyManager = () => {
                       </Box>
                     </td>
                     <td style={{ padding: "8px" }}>
-                      <Box sx={{ px: 1.5, py: 1, bgcolor: PANEL, border: `1px solid ${BORDER}`, borderRadius: 1, minWidth: isMobile ? 90 : 120, textAlign: "right" }}>
-                        <Typography sx={{ fontFamily: MONO_FONT, fontWeight: 700, color: INK }}>
-                          {(data_?.temporary || 0).toFixed(2)}
+                      <Box sx={{ px: 1.5, py: 1, bgcolor: negative ? NEGATIVE_BG : PANEL, border: `1px solid ${negative ? NEGATIVE_BORDER : BORDER}`, borderRadius: 1, minWidth: isMobile ? 90 : 120, textAlign: "right" }}>
+                        <Typography sx={{ fontFamily: MONO_FONT, fontWeight: 700, color: negative ? NEGATIVE : INK }}>
+                          {formatValue(data_?.temporary, 2)}
                         </Typography>
                       </Box>
                     </td>
@@ -771,6 +851,18 @@ const KANAL_LABELS = { "1": "L1", "2": "L2", "3": "L3", "4": "N" };
 const KANAL_OPTIONS = ["1", "2", "3", "4"];
 const KANAL_COLORS = { "1": "#795548", "2": "#000000", "3": "#757575", "4": "#1976d2" };
 
+// ✅ Afficheur sombre (readout) qui passe en rouge si la valeur est négative
+const Readout = ({ value, decimals, unit, fontSize, radius = '8px', py = 1.4, mx = 1.2, my = 1.2, variant }) => {
+  const negative = isNegativeValue(value, decimals);
+  return (
+    <Box sx={{ mx, my, bgcolor: READOUT_BG, borderRadius: radius, py }}>
+      <Typography variant={variant} sx={{ fontFamily: MONO_FONT, fontWeight: 700, color: negative ? NEGATIVE_READOUT : READOUT_FG, ...(fontSize ? { fontSize } : {}) }}>
+        {formatValue(value, decimals, unit)}
+      </Typography>
+    </Box>
+  );
+};
+
 // ─── MAPPING DETAIL ───────────────────────────────────────────────────────────
 const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
   const [selectedKanal, setSelectedKanal]   = useState(initialKanal);
@@ -792,7 +884,7 @@ const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
         const res = await axios.get(
           `${API_BASE_URL}/sensor-history/${device}/${selectedKanal}?metric=${selectedMetric}&time=${timeRange}`
         );
-        if (!cancelled && res.data?.data) setHistoryData(res.data.data);
+        if (!cancelled && res.data?.data) setHistoryData(normalizeHistory(res.data.data));
       } catch (err) { console.error("Erreur historique sensor-history:", err); }
     };
     update();
@@ -870,11 +962,7 @@ const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
         {MAPPING_METRIC_OPTIONS.map(m => (
           <Paper key={m.value} elevation={0} sx={{ flex: 1, minWidth: 150, p: 0, textAlign: "center", overflow: 'hidden', bgcolor: PANEL }}>
             <Typography variant="caption" sx={{ color: INK_MUTED, display: 'block', pt: 1.2 }}>{m.label}</Typography>
-            <Box sx={{ mx: 1.2, my: 1.2, bgcolor: READOUT_BG, borderRadius: '8px', py: 1.4 }}>
-              <Typography variant="h6" sx={{ fontFamily: MONO_FONT, fontWeight: 700, color: '#7CC7E8' }}>
-                {formatValue(currentKanalData[m.value], m.decimals, m.unit)}
-              </Typography>
-            </Box>
+            <Readout value={currentKanalData[m.value]} decimals={m.decimals} unit={m.unit} variant="h6" />
           </Paper>
         ))}
       </Box>
@@ -889,9 +977,10 @@ const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
               <CartesianGrid stroke={BORDER} strokeDasharray="5 5" />
               <XAxis dataKey="time" tickFormatter={formatXAxis} angle={-30} textAnchor="end" height={60}
                 tick={{ fontSize: 11, fill: INK_MUTED }} axisLine={{ stroke: BORDER, strokeWidth: 1 }} />
-              <YAxis tick={{ fontSize: 11, fill: INK_MUTED }} axisLine={{ stroke: BORDER, strokeWidth: 1 }}
-                label={{ value: MAPPING_METRIC_LABELS[selectedMetric], angle: -90, position: "insideLeft",
-                  style: { textAnchor: "middle", fill: INK_MUTED, fontSize: 12 } }} />
+              <YAxis {...chartYAxisProps(MAPPING_METRIC_LABELS[selectedMetric])} />
+              {hasNegativeData(historyData, selectedMetric) && (
+                <ReferenceLine y={0} stroke={INK_MUTED} strokeWidth={1.5} />
+              )}
               <RTooltip labelFormatter={t => new Date(t).toLocaleString()}
                 wrapperStyle={{ pointerEvents: "auto" }}
                 contentStyle={{ backgroundColor: PANEL, border: `1px solid ${BORDER}`, borderRadius: 8, fontSize: 12 }} />
@@ -1060,11 +1149,7 @@ const MappingManager = () => {
                 <VoltageSvgIcon sx={{ color: BRAND, fontSize: 18 }} />
                 <Typography variant="subtitle1" sx={{ fontWeight: 700, color: INK }}>{phase}</Typography>
               </Box>
-              <Box sx={{ mx: 2, my: 1.6, bgcolor: READOUT_BG, borderRadius: '10px', py: 2 }}>
-                <Typography sx={{ fontFamily: MONO_FONT, fontWeight: 700, fontSize: '1.8rem', color: '#7CC7E8' }}>
-                  {formatValue(getNetzVoltage(kanal), 1, "V")}
-                </Typography>
-              </Box>
+              <Readout value={getNetzVoltage(kanal)} decimals={1} unit="V" fontSize="1.8rem" radius="10px" py={2} mx={2} my={1.6} />
               <Typography variant="caption" sx={{ color: INK_MUTED, display: 'block', pb: 1.6 }}>{label}</Typography>
             </Paper>
           ))}
@@ -1114,7 +1199,9 @@ const MappingManager = () => {
                             <Icon sx={{ color: INK_MUTED, fontSize: "0.8rem" }} />
                             <Typography variant="caption" sx={{ color: INK_MUTED }}>{m.label.split(" ")[0]}:</Typography>
                           </Box>
-                          <ValueBadge>{formatValue(k[m.value], m.decimals, m.unit)}</ValueBadge>
+                          <ValueBadge negative={isNegativeValue(k[m.value], m.decimals)}>
+                            {formatValue(k[m.value], m.decimals, m.unit)}
+                          </ValueBadge>
                         </Box>
                       );
                     })}
@@ -1206,7 +1293,7 @@ function AppContent() {
     const update = async () => {
       try {
         const res = await axios.get(`${API_BASE_URL}/history/${encodeURIComponent(selectedChannel)}`, { params: { time: timeRange } });
-        if (res.data?.data) setHistoryData(res.data.data);
+        if (res.data?.data) setHistoryData(normalizeHistory(res.data.data));
       } catch (err) { console.error("Erreur historique:", err); }
     };
     update();
@@ -1279,7 +1366,9 @@ function AppContent() {
             {metric.value === "CosinusPhi" ? "Cosinus Phi:" : metric.label.split(" ")[0] + ":"}
           </Typography>
         </Box>
-        <ValueBadge>{formatValue(value, metric.decimals, metric.unit)}</ValueBadge>
+        <ValueBadge negative={isNegativeValue(value, metric.decimals)}>
+          {formatValue(value, metric.decimals, metric.unit)}
+        </ValueBadge>
       </Box>
     );
   };
@@ -1358,11 +1447,7 @@ function AppContent() {
                 <VoltageSvgIcon sx={{ color: BRAND, fontSize: 18 }} />
                 <Typography variant="subtitle1" sx={{ fontWeight: 700, color: INK }}>{phase}</Typography>
               </Box>
-              <Box sx={{ mx: 2, my: 1.6, bgcolor: READOUT_BG, borderRadius: '10px', py: 2 }}>
-                <Typography sx={{ fontFamily: MONO_FONT, fontWeight: 700, fontSize: '1.8rem', color: '#7CC7E8' }}>
-                  {formatValue(voltage, 1, "V")}
-                </Typography>
-              </Box>
+              <Readout value={voltage} decimals={1} unit="V" fontSize="1.8rem" radius="10px" py={2} mx={2} my={1.6} />
               <Typography variant="caption" sx={{ color: INK_MUTED, display: 'block', pb: 1.6 }}>{label}</Typography>
             </Paper>
           ))}
