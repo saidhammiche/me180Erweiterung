@@ -23,15 +23,12 @@ const queryApi = influxDB.getQueryApi(INFLUX_ORG);
 const writeApi = influxDB.getWriteApi(INFLUX_ORG, INFLUX_BUCKET);
 
 // ========== CONTRÔLEURS mE180 ==========
-// ✅ Chaque contrôleur a : IP, ID, measurement InfluxDB (table), tag "Device"
-// (optionnel) et son propre état.
-//
 //   .env :
-//     MESSE_IP=192.168.1.7    MESSE_ID=51105    MEGO_MEASUREMENT=mego4    MEGO4_DEVICE=mE180
-//     MESSE_IP_2=192.168.1.8  MESSE_ID_2=51105  MEGO_MEASUREMENT_2=mego1  MEGO4_DEVICE_2=
+//     MESSE_IP=192.168.1.7    MESSE_ID=51105    MEGO_MEASUREMENT=mego    mego_DEVICE=mE180
+//     MESSE_IP_2=192.168.1.8  MESSE_ID_2=51105  MEGO_MEASUREMENT_2=mego1  mego_DEVICE_2=
 //
-// Si MEGO4_DEVICE_2 est vide, on ne filtre PAS sur le tag Device (toute la
-// table mego1 appartient au contrôleur 2).
+// ✅ Les deux écritures sont acceptées : mego_DEVICE / MEGO4_DEVICE (idem _2).
+// Si la variable Device est vide, on ne filtre PAS sur le tag Device.
 const CONTROLLERS = {};
 
 function addController(num, ip, id, device, label, measurement) {
@@ -40,7 +37,7 @@ function addController(num, ip, id, device, label, measurement) {
         num,
         ip,
         id,
-        device:      device || "",
+        device:      (device || "").trim(),
         measurement: measurement,
         label:       label || `Controller ${num}`,
         channelConfig: {},
@@ -49,10 +46,10 @@ function addController(num, ip, id, device, label, measurement) {
 }
 
 addController("1", process.env.MESSE_IP,   process.env.MESSE_ID,
-    process.env.MEGO4_DEVICE ?? "mE180", process.env.MESSE_LABEL,
-    process.env.MEGO_MEASUREMENT || "mego4");
+    process.env.mego_DEVICE ?? process.env.MEGO4_DEVICE ?? "mE180", process.env.MESSE_LABEL,
+    process.env.MEGO_MEASUREMENT || "mego");
 addController("2", process.env.MESSE_IP_2, process.env.MESSE_ID_2,
-    process.env.MEGO4_DEVICE_2 ?? "",    process.env.MESSE_LABEL_2,
+    process.env.mego_DEVICE_2 ?? process.env.MEGO4_DEVICE_2 ?? "", process.env.MESSE_LABEL_2,
     process.env.MEGO_MEASUREMENT_2 || "mego1");
 
 if (!CONTROLLERS["1"]) {
@@ -74,19 +71,22 @@ function getCtrl(req, res) {
     return ctrl;
 }
 
-// ✅ Filtres Flux communs : measurement du contrôleur + Device (si défini)
+const fluxStr = (s) => String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+
+// ✅ Filtres Flux communs : table du contrôleur + Device (si défini).
+// "not exists r.Device" : si la colonne Device n'existe pas (ou s'appelle
+// autrement), les lignes ne sont plus rejetées.
 function fluxSourceFilters(ctrl) {
-    let f = `|> filter(fn: (r) => r._measurement == "${ctrl.measurement}")`;
-    if (ctrl.device) f += `\n                  |> filter(fn: (r) => r.Device == "${ctrl.device}")`;
+    let f = `|> filter(fn: (r) => r._measurement == "${fluxStr(ctrl.measurement)}")`;
+    if (ctrl.device) {
+        f += `\n          |> filter(fn: (r) => not exists r.Device or r.Device == "${fluxStr(ctrl.device)}")`;
+    }
     return f;
 }
 
 // ========== NOMBRES (positifs ET négatifs) ==========
-// ✅ Vrai pour tout nombre réel, y compris 0 et les valeurs négatives.
 const isNum = (v) => typeof v === "number" && Number.isFinite(v);
 
-// ✅ Parse une valeur brute du Messkoffer : "-1675063200", " -1675063200 ",
-// "-167506,32" … Renvoie null si ce n'est pas un nombre.
 function parseMesskofferNumber(raw) {
     if (raw === undefined || raw === null) return null;
     const s = String(raw).trim().replace(/[\u2212\u2013]/g, "-").replace(/\s+/g, "").replace(",", ".");
@@ -101,6 +101,23 @@ const channelsList = [
     "CH2 g", "CH2 h", "CH2 i", "CH2 j", "CH2 k", "CH2 l",
     "CH3 m", "CH3 n", "CH3 o", "CH3 p", "CH3 q", "CH3 r"
 ];
+
+// ✅ Les tables n'écrivent pas le canal de la même façon :
+//    mego  → "PH1 a"   ·   mego1 → "CH1 a"
+// Tout est ramené au format interne "CH1 a".
+function normalizeKanal(k) {
+    const m = String(k ?? "").trim().match(/^(?:CH|PH|Ph)\s*(\d+)\s*([a-r])$/i);
+    return m ? `CH${m[1]} ${m[2].toLowerCase()}` : String(k ?? "").trim();
+}
+// Toutes les écritures possibles d'un canal, pour les filtres Flux.
+function kanalVariants(ch) {
+    const m = String(ch).match(/^CH(\d+)\s+([a-r])$/i);
+    if (!m) return [ch];
+    return [`CH${m[1]} ${m[2]}`, `PH${m[1]} ${m[2]}`, `Ph${m[1]} ${m[2]}`];
+}
+
+// ✅ Strom = valeur efficace → toujours positive. La Wirkleistung garde son signe.
+const absOrNull = (v) => (v === null || v === undefined || isNaN(v)) ? v : Math.abs(v);
 
 function getChannelNumber(ch) {
     const idx = channelsList.indexOf(ch);
@@ -270,9 +287,6 @@ async function setThresholdToMesskoffer(ctrl, channelNum, valueAmps) {
     }
 }
 
-// ✅ Les valeurs négatives sont conservées. Une valeur illisible n'est plus
-// remplacée par 0 : le canal est simplement absent, ce qui permet aux routes
-// d'utiliser la dernière valeur connue.
 async function getEnergiesFromMesskoffer(ctrl) {
     const url = `http://${ctrl.ip}/get_energy_values.cgi?id=${ctrl.id}`;
     try {
@@ -378,6 +392,59 @@ app.get("/controllers", (req, res) => {
     })));
 });
 
+// ========== DIAGNOSTIC INFLUXDB ==========
+// ✅ GET /debug/influx?controller=1
+// Montre ce que la table contient vraiment (tags, Kanal, Device, champs) et
+// combien de lignes passent les filtres du serveur.
+const cleanRow = ({ result, table, ...rest }) => rest;
+
+app.get("/debug/influx", async (req, res) => {
+    const ctrl = getCtrl(req, res); if (!ctrl) return;
+    const B = fluxStr(INFLUX_BUCKET), M = fluxStr(ctrl.measurement);
+    const run = async (q) => {
+        try { return (await queryApi.collectRows(q)).map(cleanRow); }
+        catch (err) { return { error: err.message }; }
+    };
+    const values = (rows) => Array.isArray(rows) ? rows.map(r => r._value) : rows;
+
+    const [tagKeys, kanaele, devices, fields, sample, countAll, countFiltered] = await Promise.all([
+        run(`import "influxdata/influxdb/schema"
+             schema.measurementTagKeys(bucket: "${B}", measurement: "${M}", start: -1h)`),
+        run(`import "influxdata/influxdb/schema"
+             schema.measurementTagValues(bucket: "${B}", measurement: "${M}", tag: "Kanal", start: -1h)`),
+        run(`import "influxdata/influxdb/schema"
+             schema.measurementTagValues(bucket: "${B}", measurement: "${M}", tag: "Device", start: -1h)`),
+        run(`import "influxdata/influxdb/schema"
+             schema.measurementFieldKeys(bucket: "${B}", measurement: "${M}", start: -1h)`),
+        run(`from(bucket: "${B}") |> range(start: -10m)
+               |> filter(fn: (r) => r._measurement == "${M}")
+               |> limit(n: 1) |> group() |> limit(n: 5)`),
+        run(`from(bucket: "${B}") |> range(start: -10m)
+               |> filter(fn: (r) => r._measurement == "${M}")
+               |> group() |> count()`),
+        run(`from(bucket: "${B}") |> range(start: -10m)
+               ${fluxSourceFilters(ctrl)}
+               |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Leistungsfaktor")
+               |> group() |> count()`),
+    ]);
+
+    res.json({
+        controller:  ctrl.num,
+        influxUrl:   INFLUX_URL,
+        bucket:      INFLUX_BUCKET,
+        measurement: ctrl.measurement,
+        deviceFilter: ctrl.device || "(kein Filter)",
+        tagKeys:     values(tagKeys),
+        kanalValues: values(kanaele),
+        deviceValues: values(devices),
+        fields:      values(fields),
+        rowsLast10min_table:        Array.isArray(countAll) ? (countAll[0]?._value ?? 0) : countAll,
+        rowsLast10min_afterFilters: Array.isArray(countFiltered) ? (countFiltered[0]?._value ?? 0) : countFiltered,
+        expectedKanal: channelsList,
+        sampleRows:  sample,
+    });
+});
+
 // ========== ROUTES MESSKOFFER DIREKT ==========
 
 app.get("/messkoffer/labels", async (req, res) => {
@@ -401,8 +468,6 @@ app.get("/messkoffer/threshold", async (req, res) => {
     res.json(thresholds);
 });
 
-// ✅ Diagnostic : réponse brute du Messkoffer pour les énergies
-//    GET /messkoffer/energy-raw?controller=1
 app.get("/messkoffer/energy-raw", async (req, res) => {
     const ctrl = getCtrl(req, res); if (!ctrl) return;
     try {
@@ -490,8 +555,6 @@ app.post("/config", async (req, res) => {
         return res.status(500).json({ error: err.message });
     }
 
-    // ✅ L'historique InfluxDB est secondaire : une erreur d'écriture ne doit
-    // plus faire échouer la sauvegarde (elle est seulement journalisée).
     if (points.length > 0) {
         try {
             writeApi.writePoints(points);
@@ -519,7 +582,6 @@ app.get("/energy-values", async (req, res) => {
         const result = {};
         for (const ch of channelsList) {
             const previous  = ctrl.energyConfig[ch] || { temporary: 0, updatedAt: 0 };
-            // ✅ Négatif ou zéro acceptés ; dernière valeur connue seulement si illisible
             const newTemp   = isNum(temporary[ch]) ? temporary[ch] : (previous.temporary ?? 0);
             const changed   = hasEnergyChanged(newTemp, previous.temporary);
             const updatedAt = changed ? Date.now() : previous.updatedAt;
@@ -549,7 +611,7 @@ app.post("/energy-values/set", async (req, res) => {
             if (!channelsList.includes(ch) || !cfg || typeof cfg !== "object") continue;
             const oldTemp = ctrl.energyConfig[ch]?.temporary ?? 0;
             const parsed  = parseMesskofferNumber(cfg.temporary);
-            if (parsed === null) continue;                       // ✅ valeur invalide ignorée
+            if (parsed === null) continue;
             if (!hasEnergyChanged(parsed, oldTemp)) continue;
 
             await setEnergyToMesskoffer(ctrl, getChannelNumber(ch), parsed);
@@ -562,7 +624,6 @@ app.post("/energy-values/set", async (req, res) => {
         const result = {};
         for (const ch of channelsList) {
             const previous = ctrl.energyConfig[ch] || { temporary: 0, updatedAt: 0 };
-            // ✅ Avant : "temporary[ch] > 0" → toute valeur négative était ignorée
             const confirmedTemp = isNum(temporary[ch]) ? temporary[ch] : (previous.temporary ?? 0);
             const changed   = hasEnergyChanged(confirmedTemp, previous.temporary);
             const updatedAt = changed ? Date.now() : previous.updatedAt;
@@ -593,46 +654,47 @@ function computeApparentAndReactive(P, cosPhi) {
 }
 
 // ========== ROUTE DATA (Echtzeit) ==========
+// ✅ Une seule requête Flux pour les 18 canaux, identifiés par table + Device
+// + Kanal. Le filtre sur "Label" est supprimé : il bloquait tout dès que la
+// Bezeichnung du Messkoffer différait du tag Label écrit dans InfluxDB.
 app.get("/data", async (req, res) => {
     const ctrl = getCtrl(req, res); if (!ctrl) return;
     try {
-        const [{ temporary: messeEnergy }, voltagesU] = await Promise.all([
+        const fluxQuery = `
+            from(bucket: "${fluxStr(INFLUX_BUCKET)}")
+              |> range(start: -10m)
+              ${fluxSourceFilters(ctrl)}
+              |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Leistungsfaktor")
+              |> group(columns: ["Kanal", "_field"])
+              |> sort(columns: ["_time"])
+              |> last()
+        `;
+
+        const [{ temporary: messeEnergy }, voltagesU, rows] = await Promise.all([
             getEnergiesFromMesskoffer(ctrl),
             getVoltagesFromMesskoffer(ctrl).catch(err => {
                 console.error(`[${ctrl.label} /data] Fehler Spannungen:`, err.message);
                 return { 1: 0, 2: 0, 3: 0 };
+            }),
+            queryApi.collectRows(fluxQuery).catch(err => {
+                console.error(`[${ctrl.label} /data] Flux Fehler:`, err.message);
+                return [];
             })
         ]);
 
-        const queries = channelsList.map(ch => {
-            const label     = ctrl.channelConfig[ch]?.label || ch;
-            const safeLabel = label.replace(/"/g, '\\"');
-            return `
-                from(bucket: "${INFLUX_BUCKET}")
-                  |> range(start: -10m)
-                  ${fluxSourceFilters(ctrl)}
-                  |> filter(fn: (r) => r.Kanal  == "${ch}")
-                  |> filter(fn: (r) => r.Label  == "${safeLabel}")
-                  |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Leistungsfaktor")
-                  |> last()
-            `;
+        const byKanal = {};
+        rows.forEach(row => {
+            const k = normalizeKanal(row.Kanal);
+            if (!k) return;
+            if (!byKanal[k]) byKanal[k] = {};
+            if      (row._field === "Strom")           byKanal[k].Strom        = row._value;
+            else if (row._field === "Wirkleistung")    byKanal[k].Wirkleistung = row._value;
+            else if (row._field === "Leistungsfaktor") byKanal[k].CosinusPhi   = row._value;
         });
-
-        const results = await Promise.all(
-            queries.map(q => queryApi.collectRows(q).catch(err => {
-                console.error(`[${ctrl.label} /data] Flux Fehler:`, err.message);
-                return [];
-            }))
-        );
 
         const result = {};
         channelsList.forEach((ch, idx) => {
-            const influxData = {};
-            results[idx].forEach(row => {
-                if      (row._field === "Strom")           influxData.Strom        = row._value;
-                else if (row._field === "Wirkleistung")    influxData.Wirkleistung = row._value;
-                else if (row._field === "Leistungsfaktor") influxData.CosinusPhi   = row._value;
-            });
+            const influxData = byKanal[ch] || {};
 
             const voltKanal = idx < 6 ? 1 : (idx < 12 ? 2 : 3);
             const U      = voltagesU[voltKanal] ?? null;
@@ -641,8 +703,6 @@ app.get("/data", async (req, res) => {
             const cosPhi = influxData.CosinusPhi   ?? null;
             const { S, Q } = computeApparentAndReactive(P, cosPhi);
 
-            // ✅ Avant : "> 0" des deux côtés → une énergie négative devenait null (affichée 0).
-            // Maintenant : valeur du Messkoffer (même négative), sinon dernière valeur connue.
             const cached = ctrl.energyConfig[ch];
             let rawEnergie = null;
             if (isNum(messeEnergy[ch])) {
@@ -656,9 +716,9 @@ app.get("/data", async (req, res) => {
 
             result[ch] = {
                 Label:          ctrl.channelConfig[ch]?.label || ch,
-                Strom:          applyX10IfNeeded(ch, I),
+                Strom:          absOrNull(applyX10IfNeeded(ch, I)),
                 Wirkleistung:   applyX10IfNeeded(ch, P),
-                Spannung:       applyX10IfNeeded(ch, U),
+                Spannung:       U,   // ✅ la tension de phase n'est jamais ×10
                 CosinusPhi:     cosPhi,
                 Energie_temp:   rawEnergie,
                 Scheinleistung: applyX10IfNeeded(ch, S),
@@ -674,6 +734,7 @@ app.get("/data", async (req, res) => {
 });
 
 // ========== ROUTE HISTORY ==========
+// ✅ Même logique : table + Device + Kanal, sans filtre Label.
 app.get("/history/:channel", async (req, res) => {
     const ctrl = getCtrl(req, res); if (!ctrl) return;
     const ch = req.params.channel;
@@ -681,21 +742,19 @@ app.get("/history/:channel", async (req, res) => {
         return res.status(400).json({ error: "Ungültiger Kanal" });
     }
 
-    let duration = req.query.time || "1h";
-    if (duration.includes("d") && parseInt(duration) > 1) duration = "24h";
-
-    const label     = ctrl.channelConfig[ch]?.label || ch;
-    const safeLabel = label.replace(/"/g, '\\"');
+    let duration = String(req.query.time || "1h");
+    if (!/^\d+[smhd]$/.test(duration)) duration = "1h";
+    if (duration.endsWith("d") && parseInt(duration) > 1) duration = "24h";
 
     const fluxQuery = `
-        from(bucket: "${INFLUX_BUCKET}")
+        from(bucket: "${fluxStr(INFLUX_BUCKET)}")
           |> range(start: -${duration})
           ${fluxSourceFilters(ctrl)}
-          |> filter(fn: (r) => r.Kanal  == "${ch}")
-          |> filter(fn: (r) => r.Label  == "${safeLabel}")
+          |> filter(fn: (r) => ${kanalVariants(ch).map(v => `r.Kanal == "${fluxStr(v)}"`).join(" or ")})
           |> filter(fn: (r) => r._field == "Strom" or r._field == "Wirkleistung" or r._field == "Leistungsfaktor" or r._field == "Energie")
-          |> aggregateWindow(every: 10s, fn: mean, createEmpty: false)
+          |> group(columns: ["_field"])
           |> sort(columns: ["_time"])
+          |> aggregateWindow(every: 10s, fn: mean, createEmpty: false)
     `;
 
     try {
@@ -715,7 +774,7 @@ app.get("/history/:channel", async (req, res) => {
                 const { S, Q } = computeApparentAndReactive(point.Wirkleistung ?? null, point.CosinusPhi ?? null);
                 return {
                     time:           point.time,
-                    Strom:          applyX10IfNeeded(ch, point.Strom ?? null),
+                    Strom:          absOrNull(applyX10IfNeeded(ch, point.Strom ?? null)),
                     Wirkleistung:   applyX10IfNeeded(ch, point.Wirkleistung ?? null),
                     CosinusPhi:     point.CosinusPhi ?? null,
                     Energie:        point.Energie ?? null,
@@ -744,6 +803,26 @@ app.get("/voltages", async (req, res) => {
     }
 });
 
+// ========== CONTRÔLE AU DÉMARRAGE ==========
+// ✅ Affiche dans les logs combien de lignes InfluxDB chaque contrôleur trouve.
+async function startupInfluxCheck() {
+    for (const ctrl of Object.values(CONTROLLERS)) {
+        const q = `
+            from(bucket: "${fluxStr(INFLUX_BUCKET)}")
+              |> range(start: -10m)
+              ${fluxSourceFilters(ctrl)}
+              |> group() |> count()`;
+        try {
+            const rows = await queryApi.collectRows(q);
+            const n = rows[0]?._value ?? 0;
+            if (n > 0) console.log(`   ✅ [${ctrl.num}] InfluxDB: ${n} Zeilen in den letzten 10 min (${ctrl.measurement})`);
+            else       console.warn(`   ⚠️  [${ctrl.num}] InfluxDB: KEINE Daten in ${ctrl.measurement} (Device: ${ctrl.device || "-"}) → /debug/influx?controller=${ctrl.num}`);
+        } catch (err) {
+            console.error(`   ❌ [${ctrl.num}] InfluxDB nicht erreichbar (${INFLUX_URL}): ${err.message}`);
+        }
+    }
+}
+
 // ========== START ==========
 app.listen(4000, "0.0.0.0", () => {
     console.log("✅ Server läuft auf Port 4000");
@@ -752,4 +831,5 @@ app.listen(4000, "0.0.0.0", () => {
         console.log(`   [${c.num}] ${c.label}: ${c.ip} | ID: ${c.id} | Measurement: ${c.measurement} | Device: ${c.device || "(kein Filter)"}`)
     );
     console.log(`   Canaux ×10: ${CHANNELS_X10.join(", ")}`);
+    startupInfluxCheck();
 });
