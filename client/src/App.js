@@ -3,7 +3,10 @@
 // même typographie, mêmes cartes à bordure fine sans ombre lourde, mêmes
 // pastilles de statut). Toute la logique métier (état, appels API, polling)
 // est strictement inchangée — seul l'habillage visuel a été repris.
-import React, { useEffect, useState, useCallback, memo } from "react";
+// ✅ Vue "sensorconfig" (Sensor-Bezeichnung) réécrite en version industrielle :
+// saisie fluide (plus de perte de focus), suivi des modifications, barre
+// d'enregistrement, Strg+S, recherche.
+import React, { useEffect, useState, useCallback, memo, useRef } from "react";
 import axios from "axios";
 import { ThemeProvider, createTheme } from "@mui/material/styles";
 import {
@@ -94,7 +97,7 @@ const theme = createTheme({
 });
 
 const API_BASE_URL = `${window.location.protocol}//${window.location.hostname}:4000`;
-const STARTSEITE_URL = "http://192.168.1.20:8080";
+const STARTSEITE_URL = "http://172.16.1.177:8080";
 
 // ✅ Affichage des canaux du mE180 : le préfixe "CH" est simplement remplacé
 // par "PH" à l'affichage (ex: tag brut "CH1 a" -> affiché "PH1 a"), le
@@ -107,12 +110,8 @@ const CHANNEL_ORDER = [
   "CH3 m", "CH3 n", "CH3 o", "CH3 p", "CH3 q", "CH3 r"
 ];
 
-// ✅ Rendu à deux tons pour la lisibilité : "PH" en gris discret, le reste
-// ("1 a", "2 g"...) en couleur marque et en gras.
-// ✅ "PH" + numéro de groupe (PH1, PH2, PH3) gardent toujours le même style
-// discret (gris, taille normale) quel que soit le canal — seule la lettre
-// (a, b, c...) ressort dans une couleur différente pour repérer le canal
-// exact au sein d'un groupe.
+// ✅ Rendu à deux tons pour la lisibilité : "PH" + numéro de groupe en gris
+// discret, seule la lettre (a, b, c...) ressort en couleur.
 const getChannelParts = (ch) => {
   const m = String(ch).match(/^CH(\d+)\s+([a-r])$/i);
   return m ? { group: m[1], letter: m[2] } : null;
@@ -129,13 +128,9 @@ const ChannelLabel = ({ channel, letterColor = BRAND }) => {
   );
 };
 
-// ✅ MODIFIÉ : Cosinus Phi retiré de l'affichage (l'utilisateur ne veut plus
-// le voir dans les boxes). Le calcul backend (Blindleistung/Scheinleistung)
-// n'est pas affecté, seul l'affichage frontend est concerné.
 // ✅ METRIC_LABELS alimente uniquement le sélecteur de la vue détaillée
 // "Trends" (graphique historique par canal CH1-CH18) — Cosinus Phi y reste
-// absent volontairement. Les cartes Live Daten utilisent METRIC_OPTIONS
-// (ci-dessous), qui inclut bien Cosinus Phi.
+// absent volontairement. Les cartes Live Daten utilisent METRIC_OPTIONS.
 const METRIC_LABELS = {
   Strom:        "Strom (A)",
   Wirkleistung: "Wirkleistung (W)",
@@ -163,19 +158,14 @@ const TIME_RANGE_OPTIONS = [
 ];
 
 const formatValue = (value, decimals = 3, unit = "") => {
-  // ✅ MODIFIÉ : au lieu d'afficher "—" quand il n'y a pas de valeur (null/undefined/NaN),
-  // on affiche "0" formaté (avec les mêmes décimales et unité qu'une vraie valeur).
+  // ✅ Affiche "0" formaté au lieu de "—" quand il n'y a pas de valeur.
   let num = parseFloat(value);
   if (value === undefined || value === null || isNaN(num)) num = 0;
   return `${num.toFixed(decimals)}${unit ? " " + unit : ""}`;
 };
 
-// ✅ MODIFIÉ : Strom, Wirkleistung, Blindleistung et CosinusPhi sont tous les
-// 4 lus en une seule requête Modbus groupée (adresses contiguës 0x5018-0x5037
-// sur l'appareil) et écrits bruts dans InfluxDB — ce ne sont donc plus des
-// valeurs calculées ici. Seule Scheinleistung (S = U × I) reste calculée côté
-// React, à partir de Strom + de la tension partagée "Netz" (lue une seule
-// fois pour toute l'installation, pas par capteur).
+// ✅ Seule Scheinleistung (S = U × I) est calculée côté React, à partir de
+// Strom + de la tension partagée "Netz".
 const computeScheinleistung = (U, I) => {
   if (U === null || U === undefined || isNaN(U) || I === null || I === undefined || isNaN(I)) {
     return null;
@@ -183,10 +173,8 @@ const computeScheinleistung = (U, I) => {
   return U * I;
 };
 
-// ✅ NOUVEAU : injecte Spannung (depuis le device "Netz", lu une seule fois
-// pour toute l'installation) et Scheinleistung calculée sur chaque Kanal de
-// chaque Sensor. Le Kanal "4" (Neutre) n'a pas de tension de phase propre
-// dans "Netz" : ces champs y restent null (comportement inchangé).
+// ✅ Injecte Spannung (device "Netz") et Scheinleistung calculée sur chaque
+// Kanal de chaque Sensor. Le Kanal "4" (Neutre) reste à null.
 const augmentSensorsWithDerivedValues = (rawSensors) => {
   const netzDevice = rawSensors.find(s => s.device === "Netz" || s.device === "Sensor0");
   const voltageForKanal = (kanal) => {
@@ -206,12 +194,8 @@ const augmentSensorsWithDerivedValues = (rawSensors) => {
   });
 };
 
-// ✅ CORRIGÉ : Node-RED écrit "Energie" (Sensor1/2/3, measurement "sensoren")
-// directement en kWh — c'est le registre Econsumed du Volt1000S (Modbus,
-// float32, unité KWh d'après la doc constructeur), lu tel quel sans aucune
-// mise à l'échelle. Il n'y a donc plus de conversion à faire ici : avant, une
-// division par 1000 supposait à tort un stockage en Wh, ce qui affichait des
-// valeurs 1000x trop petites (ex: 0.35 kWh réel -> 0.00 kWh affiché).
+// ✅ "Energie" est déjà en kWh (registre Econsumed du Volt1000S) — aucune
+// conversion d'unité.
 const formatMappingMetricValue = (metric, rawValue) => {
   return formatValue(rawValue, metric.decimals, metric.unit);
 };
@@ -230,8 +214,7 @@ const ValueBadge = ({ children, muted = false }) => (
 
 // ─── FILTER BAR ───────────────────────────────────────────────────────────────
 // ✅ itemsLabel permet de réutiliser ce composant pour filtrer soit des
-// "Kanäle" (vue Live Daten/Trends), soit des "Sensoren" (vue Mapping) — seul
-// le texte affiché change, toute la logique de sélection reste identique.
+// "Kanäle", soit des "Sensoren".
 const FilterBar = memo(({
   selectedChannels, selectedMetrics,
   onChannelChange, onSelectAllChannels,
@@ -568,197 +551,317 @@ const ChannelConfigManager = () => {
   );
 };
 
-// ─── SENSOR-BEZEICHNUNG (Kundendaten) ────────────────────────────────────────
-// ✅ Vue "sensorconfig" — habillage repris à l'identique du portail principal :
-// en-tête avec icône dans un cercle de couleur, puce de statut "Live Daten",
-// bouton "Alle speichern" plein, colonnes en Paper à bordure fine (sans ombre),
-// et chaque Kanal affiché comme une mini-carte avec liseré de couleur.
-// Enregistrement via /kundendaten-labels (backend port 4000).
+// ─── SENSOR-BEZEICHNUNG (Kundendaten) — version industrielle ─────────────────
+// Sous-composants déclarés au niveau du module : le focus des champs reste
+// stable pendant la saisie et pendant le rafraîchissement automatique.
+const SC_KANAEL   = ["1", "2", "3", "4"];
+const SC_MAX_LEN  = 40;
+const SC_EXCLUDED = ["Netz", "Sensor0"];
+const scKey       = (device, kanal) => `${device}_${kanal}`;
+const scSplitKey  = (key) => {
+  const i = key.lastIndexOf("_");
+  return { device: key.slice(0, i), kanal: key.slice(i + 1) };
+};
+
+// ── Petit afficheur de valeur live (fond sombre, police mono) ──
+const ScReadout = ({ label, value }) => (
+  <Box sx={{ flex: 1, minWidth: 0, bgcolor: READOUT_BG, borderRadius: "6px", px: 1.2, py: 0.6, textAlign: "right" }}>
+    <Typography sx={{ fontSize: "0.68rem", color: "#8A97A4", lineHeight: 1.2 }}>{label}</Typography>
+    <Typography sx={{ fontFamily: MONO_FONT, fontWeight: 700, fontSize: "0.88rem", color: "#7CC7E8", lineHeight: 1.35, whiteSpace: "nowrap" }}>
+      {value}
+    </Typography>
+  </Box>
+);
+
+// ── Une ligne = un Kanal (couleur de conducteur, saisie, valeurs live) ──
+const ScKanalRow = memo(({ device, kanal, live, value, savedValue, onChange, isMobile }) => {
+  const dirty  = value !== savedValue;
+  const online = Boolean(live);
+  const inputId = `bez-${device}-${kanal}`;
+  return (
+    <Box sx={{
+      display: "grid",
+      gridTemplateColumns: isMobile ? "1fr" : "112px minmax(0, 1fr) 230px",
+      alignItems: "center", gap: isMobile ? 1 : 2,
+      px: 2, py: 1.3,
+      borderTop: `1px solid ${BORDER}`,
+      bgcolor: dirty ? WARNING_BG : "transparent",
+      transition: "background-color .15s ease",
+    }}>
+      {/* Conducteur : couleur réelle du fil (braun / schwarz / grau / blau) */}
+      <Box display="flex" alignItems="center" gap={1.2}>
+        <Box sx={{ width: 5, height: 34, borderRadius: "3px", bgcolor: KANAL_COLORS[kanal] || BORDER, flexShrink: 0 }} />
+        <Box>
+          <Typography component="label" htmlFor={inputId}
+            sx={{ display: "block", fontFamily: MONO_FONT, fontWeight: 700, fontSize: "0.95rem", color: INK, lineHeight: 1.15 }}>
+            {KANAL_LABELS[kanal]}
+          </Typography>
+          <Box display="flex" alignItems="center" gap={0.6}>
+            <Box sx={{ width: 7, height: 7, borderRadius: "50%", bgcolor: online ? SUCCESS : "#C4C9D1" }} />
+            <Typography sx={{ fontSize: "0.72rem", color: INK_MUTED }}>
+              Kanal {kanal} · {online ? "aktiv" : "kein Signal"}
+            </Typography>
+          </Box>
+        </Box>
+      </Box>
+
+      {/* Champ de saisie : large, toujours éditable, compteur de caractères */}
+      <TextField
+        id={inputId}
+        fullWidth size="small" variant="outlined"
+        value={value}
+        onChange={e => onChange(device, kanal, e.target.value)}
+        placeholder="z. B. Kompressor Halle 2"
+        helperText={dirty ? `Geändert · ${value.length}/${SC_MAX_LEN}` : " "}
+        FormHelperTextProps={{ sx: { m: 0, mt: 0.3, fontSize: "0.7rem", color: dirty ? WARNING : INK_MUTED, minHeight: 14 } }}
+        inputProps={{ maxLength: SC_MAX_LEN, spellCheck: false, autoComplete: "off" }}
+        sx={{
+          "& .MuiOutlinedInput-root": {
+            bgcolor: PANEL, borderRadius: "8px", fontSize: "0.95rem", fontWeight: 600, color: INK,
+            "& fieldset": { borderColor: dirty ? WARNING : BORDER },
+            "&:hover fieldset": { borderColor: dirty ? WARNING : "#B8BEC7" },
+            "&.Mui-focused fieldset": { borderColor: BRAND, borderWidth: 2 },
+          },
+          "& input": { py: "9px" },
+        }}
+      />
+
+      {/* Valeurs live : aide à identifier physiquement le départ */}
+      <Box display="flex" gap={1}>
+        <ScReadout label="Strom"    value={online ? formatValue(live.Strom, 2, "A") : "– A"} />
+        <ScReadout label="Leistung" value={online ? formatValue(live.Wirkleistung, 0, "W") : "– W"} />
+      </Box>
+    </Box>
+  );
+});
+
+// ── Un panneau = un Sensor (en-tête + 4 lignes Kanal) ──
+const ScSensorPanel = memo(({ sensor, labels, saved, onChange, onDiscardSensor, isMobile }) => {
+  const activeCount = sensor.kanaele.length;
+  const dirtyCount  = SC_KANAEL.filter(k => (labels[scKey(sensor.device, k)] ?? "") !== (saved[scKey(sensor.device, k)] ?? "")).length;
+  return (
+    <Paper elevation={0} sx={{ bgcolor: PANEL, borderRadius: "12px", overflow: "hidden" }}>
+      <Box display="flex" alignItems="center" gap={1.2} sx={{ px: 2, py: 1.3, bgcolor: SURFACE }}>
+        <DeviceHubIcon sx={{ color: BRAND, fontSize: 20 }} />
+        <Typography sx={{ fontFamily: MONO_FONT, fontWeight: 700, color: INK, fontSize: "1rem" }}>{sensor.device}</Typography>
+        <Chip size="small"
+          label={activeCount > 0 ? `${activeCount}/4 Kanäle aktiv` : "Offline"}
+          sx={{ height: 22, bgcolor: activeCount > 0 ? SUCCESS_BG : "#ECEEF1", color: activeCount > 0 ? SUCCESS : INK_MUTED }} />
+        <Box flex={1} />
+        {dirtyCount > 0 && (
+          <Button size="small" onClick={() => onDiscardSensor(sensor.device)}
+            sx={{ color: WARNING, fontSize: "0.75rem", minWidth: 0, px: 1 }}>
+            {dirtyCount} Änderung{dirtyCount > 1 ? "en" : ""} verwerfen
+          </Button>
+        )}
+      </Box>
+      {SC_KANAEL.map(kanal => {
+        const key = scKey(sensor.device, kanal);
+        return (
+          <ScKanalRow key={key}
+            device={sensor.device} kanal={kanal}
+            live={sensor.kanaele.find(k => k.kanal === kanal)}
+            value={labels[key] ?? ""} savedValue={saved[key] ?? ""}
+            onChange={onChange} isMobile={isMobile} />
+        );
+      })}
+    </Paper>
+  );
+});
+
+// ── Vue principale ──
 const SensorConfigManager = () => {
   const [sensors, setSensors]         = useState([]);
-  const [labels, setLabels]           = useState({});
+  const [labels, setLabels]           = useState({});   // ce que l'utilisateur tape
+  const [saved, setSaved]             = useState({});   // ce qui est enregistré côté serveur
   const [loading, setLoading]         = useState(true);
   const [saving, setSaving]           = useState(false);
+  const [search, setSearch]           = useState("");
   const [message, setMessage]         = useState("");
   const [messageType, setMessageType] = useState("success");
-  const isMobile = useMediaQuery("(max-width:600px)");
+  const savedRef = useRef({});
+  const isMobile = useMediaQuery("(max-width:900px)");
 
-  // ✅ silent=true : rafraîchissement en arrière-plan (live), sans spinner ni
-  // écraser les champs Bezeichnung en cours d'édition par l'utilisateur.
-  const loadSensors = async (silent = false) => {
+  const flash = (type, text, ms = 3500) => {
+    setMessageType(type); setMessage(text);
+    setTimeout(() => setMessage(""), ms);
+  };
+
+  // silent=true : polling en arrière-plan. Les champs que l'utilisateur est
+  // en train de modifier ne sont JAMAIS écrasés par le serveur.
+  const loadSensors = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     try {
-      const controller = new AbortController();
-      const timeoutId  = setTimeout(() => controller.abort(), 5000);
-      const res        = await axios.get(`${API_BASE_URL}/sensors-discovery`, { signal: controller.signal });
-      clearTimeout(timeoutId);
-      const list = res.data?.sensors || [];
+      const res  = await axios.get(`${API_BASE_URL}/sensors-discovery`, { timeout: 5000 });
+      const list = (res.data?.sensors || []).filter(s => !SC_EXCLUDED.includes(s.device));
+
+      const serverLabels = {};
+      list.forEach(s => SC_KANAEL.forEach(kanal => {
+        const k = s.kanaele.find(x => x.kanal === kanal);
+        serverLabels[scKey(s.device, kanal)] = k?.Bezeichnung || "";
+      }));
+
+      const prevSaved = savedRef.current;
+      savedRef.current = serverLabels;
       setSensors(list);
+      setSaved(serverLabels);
       setLabels(prev => {
         const next = { ...prev };
-        list.forEach(s => {
-          s.kanaele.forEach(k => {
-            const key = `${s.device}_${k.kanal}`;
-            if (next[key] === undefined) next[key] = k.Bezeichnung || "";
-          });
+        Object.keys(serverLabels).forEach(key => {
+          const untouched = next[key] === undefined || next[key] === (prevSaved[key] ?? "");
+          if (untouched) next[key] = serverLabels[key];
         });
         return next;
       });
     } catch (err) {
       if (!silent) {
-        setMessageType("error");
-        setMessage(err.name === "AbortError"
-          ? "❌ Zeitüberschreitung: Server antwortet nicht."
-          : "❌ Fehler beim Laden der Sensoren: " + (err.message || "Netzwerkproblem"));
-        setTimeout(() => setMessage(""), 5000);
+        flash("error", err.code === "ECONNABORTED"
+          ? "Server antwortet nicht. Verbindung prüfen und erneut laden."
+          : "Sensoren konnten nicht geladen werden. Verbindung prüfen.", 5000);
       }
     } finally { if (!silent) setLoading(false); }
-  };
+  }, []);
 
   useEffect(() => {
     loadSensors(false);
-    // ✅ Live Daten : rafraîchissement automatique toutes les 3 secondes
     const iv = setInterval(() => loadSensors(true), 3000);
     return () => clearInterval(iv);
+  }, [loadSensors]);
+
+  const handleChange = useCallback((device, kanal, value) =>
+    setLabels(prev => ({ ...prev, [scKey(device, kanal)]: value })), []);
+
+  const dirtyKeys = Object.keys(saved).filter(key => (labels[key] ?? "") !== (saved[key] ?? ""));
+  const dirtyCount = dirtyKeys.length;
+
+  const discardAll = () => setLabels(prev => ({ ...prev, ...savedRef.current }));
+  const discardSensor = useCallback((device) => {
+    setLabels(prev => {
+      const next = { ...prev };
+      SC_KANAEL.forEach(k => { const key = scKey(device, k); next[key] = savedRef.current[key] ?? ""; });
+      return next;
+    });
   }, []);
 
-  const handleChange = (device, kanal, value) =>
-    setLabels(prev => ({ ...prev, [`${device}_${kanal}`]: value }));
-
+  // Enregistre uniquement les champs modifiés (moins de requêtes)
   const saveAll = async () => {
+    if (dirtyCount === 0 || saving) return;
     setSaving(true);
-    try {
-      const requests = [];
-      sensors.filter(s => s.device !== "Netz" && s.device !== "Sensor0").forEach(s => {
-        ["1", "2", "3", "4"].forEach(kanal => {
-          const key = `${s.device}_${kanal}`;
-          requests.push(
-            axios.post(`${API_BASE_URL}/kundendaten-labels`, {
-              device: s.device, kanal, label: labels[key] || ""
-            })
-          );
-        });
-      });
-      await Promise.all(requests);
-      setMessageType("success");
-      setMessage("✅ Bezeichnungen erfolgreich gespeichert");
-      setTimeout(() => setMessage(""), 3000);
-      await loadSensors(false);
-    } catch {
-      setMessageType("error");
-      setMessage("❌ Fehler beim Speichern der Bezeichnungen");
-      setTimeout(() => setMessage(""), 3000);
-    } finally { setSaving(false); }
+    const results = await Promise.allSettled(dirtyKeys.map(key => {
+      const { device, kanal } = scSplitKey(key);
+      return axios.post(`${API_BASE_URL}/kundendaten-labels`, { device, kanal, label: (labels[key] || "").trim() });
+    }));
+    const failed = results.filter(r => r.status === "rejected").length;
+    const ok = results.length - failed;
+    if (failed === 0) flash("success", `${ok} Bezeichnung${ok > 1 ? "en" : ""} gespeichert`);
+    else flash("error", `${ok} gespeichert, ${failed} fehlgeschlagen. Erneut speichern.`, 5000);
+    setSaving(false);
+    loadSensors(true);
   };
 
-  if (loading) return <Typography sx={{ color: INK_MUTED }}>Sensoren werden geladen...</Typography>;
+  // Raccourci clavier Strg+S / Cmd+S
+  const saveRef = useRef(saveAll);
+  saveRef.current = saveAll;
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); saveRef.current(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
-  // ✅ "Netz"/"Sensor0" exclu : ce device ne porte que la tension (Spannung),
-  // pas de Bezeichnung client ni de Live Daten à gérer ici.
-  const realSensors = sensors.filter(s => s.device !== "Netz" && s.device !== "Sensor0");
+  // Avertit avant de quitter la page avec des changements non enregistrés
+  useEffect(() => {
+    if (dirtyCount === 0) return;
+    const onUnload = (e) => { e.preventDefault(); e.returnValue = ""; };
+    window.addEventListener("beforeunload", onUnload);
+    return () => window.removeEventListener("beforeunload", onUnload);
+  }, [dirtyCount]);
 
-  const groups = realSensors.map(s => ({
-    device:  s.device,
-    kanaele: ["1", "2", "3", "4"].map(kanal => {
-      const k = s.kanaele.find(k => k.kanal === kanal);
-      return {
-        kanal,
-        exists:         Boolean(k),
-        Strom:          k?.Strom ?? null,
-        Wirkleistung:   k?.Wirkleistung ?? null,
-        Energie:        k?.Energie ?? null,
-        CosinusPhi:     k?.CosinusPhi ?? null,
-        Blindleistung:  k?.Blindleistung ?? null,
-        Scheinleistung: k?.Scheinleistung ?? null,
-      };
-    })
-  }));
+  if (loading) return <Typography sx={{ p: 3, color: INK_MUTED }}>Sensoren werden geladen…</Typography>;
 
-  // ✅ Répartition en 3 colonnes, comme la vue "Live Daten" (Phase 1/2/3).
-  const chunkSize = Math.ceil(groups.length / 3) || 1;
-  const col1 = groups.slice(0, chunkSize);
-  const col2 = groups.slice(chunkSize, chunkSize * 2);
-  const col3 = groups.slice(chunkSize * 2);
-
-  // ── Carte d'un Kanal : liseré couleur + Kanal + Bezeichnung ──
-  const KanalCard = ({ device, kanal, exists }) => {
-    const key = `${device}_${kanal}`;
-    return (
-      <Paper elevation={0} sx={{
-        p: "10px 12px", bgcolor: exists ? PANEL : SURFACE, borderRadius: "10px", mb: "10px",
-        borderLeft: `3px solid ${KANAL_COLORS[kanal] || BORDER}`
-      }}>
-        <Box display="flex" alignItems="center" gap={1}>
-          <Typography variant="subtitle2" sx={{ fontWeight: 700, color: BRAND, fontSize: "0.82rem" }}>Kanal {kanal}</Typography>
-          <Box flex={1} />
-          <TextField size="small" value={labels[key] || ""}
-            onChange={e => handleChange(device, kanal, e.target.value)}
-            variant="outlined" disabled={!exists}
-            placeholder={exists ? "Bezeichnung" : "Kein Signal"}
-            sx={{ width: 150 }}
-            InputProps={{ style: { color: INK, fontSize: "0.85rem", fontWeight: 600, backgroundColor: exists ? SURFACE : 'transparent', padding: 0 } }}
-            inputProps={{ style: { padding: "6px 8px" } }} />
-        </Box>
-      </Paper>
-    );
-  };
-
-  // ── Colonne d'un groupe de Sensoren ──
-  const SensorColumn = ({ deviceGroups, title }) => {
-    if (deviceGroups.length === 0) return null;
-    return (
-      <Paper elevation={0} sx={{ flex: 1, p: "16px", bgcolor: PANEL, borderRadius: "14px" }}>
-        <Box display="flex" alignItems="center" justifyContent="center" gap={1} sx={{ mb: "14px" }}>
-          <Box sx={{ display: 'inline-flex', width: 26, height: 26, borderRadius: '50%', bgcolor: BRAND_BG, alignItems: 'center', justifyContent: 'center' }}>
-            <DeviceHubIcon sx={{ color: BRAND, fontSize: "0.95rem" }} />
-          </Box>
-          <Typography variant="subtitle2" sx={{ fontWeight: 700, color: INK, letterSpacing: "0.3px" }}>{title}</Typography>
-        </Box>
-        {deviceGroups.map(group => (
-          <Box key={group.device} sx={{ mb: 2 }}>
-            <Chip size="small" label={group.device} sx={{ bgcolor: SURFACE, color: INK_MUTED, mb: "8px", fontFamily: MONO_FONT }} />
-            {group.kanaele.map(k => (
-              <KanalCard key={k.kanal} device={group.device} {...k} />
-            ))}
-          </Box>
-        ))}
-      </Paper>
-    );
-  };
+  const q = search.trim().toLowerCase();
+  const visible = q
+    ? sensors.filter(s => s.device.toLowerCase().includes(q) ||
+        SC_KANAEL.some(k => (labels[scKey(s.device, k)] || "").toLowerCase().includes(q)))
+    : sensors;
+  const activeKanaele = sensors.reduce((n, s) => n + s.kanaele.length, 0);
 
   return (
-    <Paper elevation={0} sx={{ p: { xs: 2.5, md: 3.5 }, mt: 3, bgcolor: PANEL, position: 'relative', overflow: 'hidden' }}>
-      <Box sx={{ position: 'absolute', top: 0, left: 0, right: 0, height: 4, bgcolor: BRAND }} />
-      <Box display="flex" justifyContent="space-between" alignItems="center" mb={3} flexWrap="wrap" gap={1.5}>
-        <Box display="flex" alignItems="center" gap={1.4}>
-          <Box sx={{ display: 'inline-flex', width: 44, height: 44, borderRadius: '12px', bgcolor: BRAND_BG, alignItems: 'center', justifyContent: 'center' }}>
-            <DeviceHubIcon sx={{ fontSize: 24, color: BRAND }} />
+    <Box sx={{ mt: 1, pb: dirtyCount > 0 ? 10 : 2 }}>
+      {/* En-tête */}
+      <Paper elevation={0} sx={{ p: { xs: 2, md: "18px 22px" }, mb: 2, bgcolor: PANEL, position: "relative", overflow: "hidden" }}>
+        <Box sx={{ position: "absolute", top: 0, left: 0, right: 0, height: 4, bgcolor: BRAND }} />
+        <Box display="flex" alignItems="center" justifyContent="space-between" flexWrap="wrap" gap={2}>
+          <Box display="flex" alignItems="center" gap={1.4}>
+            <Box sx={{ display: "inline-flex", width: 44, height: 44, borderRadius: "10px", bgcolor: BRAND_BG, alignItems: "center", justifyContent: "center" }}>
+              <DeviceHubIcon sx={{ fontSize: 24, color: BRAND }} />
+            </Box>
+            <Box>
+              <Typography variant="h5" sx={{ color: INK, lineHeight: 1.2 }}>Sensor-Bezeichnung</Typography>
+              <Typography variant="body2" sx={{ color: INK_MUTED }}>
+                Jedem Kanal einen eindeutigen Namen geben. Strom und Leistung helfen beim Zuordnen.
+              </Typography>
+            </Box>
           </Box>
-          <Box>
-            <Typography variant="h5" sx={{ color: INK, lineHeight: 1.2 }}>Sensor-Bezeichnung</Typography>
-            <Typography variant="caption" sx={{ color: INK_MUTED }}>Kundendaten je Sensor und Kanal pflegen</Typography>
+          <Box display="flex" gap={1} flexWrap="wrap">
+            <Chip size="small" label={`${sensors.length} Sensoren`} sx={{ bgcolor: SURFACE, color: INK }} />
+            <Chip size="small" label={`${activeKanaele} Kanäle aktiv`} sx={{ bgcolor: SUCCESS_BG, color: SUCCESS }} />
+            <Chip size="small" icon={<SyncIcon sx={{ fontSize: "13px !important" }} />} label="Live, alle 3 s"
+              sx={{ bgcolor: SURFACE, color: INK_MUTED }} />
           </Box>
         </Box>
-        <Box display="flex" alignItems="center" gap={1.5}>
-          <Chip size="small" icon={<SyncIcon sx={{ fontSize: '13px !important' }} />}
-            label="Live Daten · alle 3 Sekunden" sx={{ bgcolor: SUCCESS_BG, color: SUCCESS }} />
+        <TextField size="small" value={search} onChange={e => setSearch(e.target.value)}
+          placeholder="Sensor oder Bezeichnung suchen"
+          inputProps={{ spellCheck: false, autoComplete: "off" }}
+          sx={{ mt: 2, width: { xs: "100%", sm: 360 }, "& .MuiOutlinedInput-root": { borderRadius: "8px", bgcolor: SURFACE } }} />
+      </Paper>
+
+      {message && <Alert severity={messageType === "success" ? "success" : "error"} sx={{ mb: 2, borderRadius: 2 }}>{message}</Alert>}
+
+      {sensors.length === 0 ? (
+        <Paper elevation={0} sx={{ p: 3, bgcolor: PANEL }}>
+          <Typography sx={{ color: INK, fontWeight: 700 }}>Keine Sensoren erkannt</Typography>
+          <Typography variant="body2" sx={{ color: INK_MUTED, mt: 0.5 }}>
+            Verkabelung am RS485-Bus prüfen. Die Liste aktualisiert sich automatisch.
+          </Typography>
+        </Paper>
+      ) : visible.length === 0 ? (
+        <Typography sx={{ color: INK_MUTED, p: 1 }}>Kein Treffer für „{search}“.</Typography>
+      ) : (
+        <Box sx={{ display: "grid", gap: 2, gridTemplateColumns: isMobile ? "1fr" : "repeat(auto-fill, minmax(620px, 1fr))" }}>
+          {visible.map(s => (
+            <ScSensorPanel key={s.device} sensor={s} labels={labels} saved={saved}
+              onChange={handleChange} onDiscardSensor={discardSensor} isMobile={isMobile} />
+          ))}
+        </Box>
+      )}
+
+      {/* Barre d'enregistrement : apparaît uniquement s'il y a des changements */}
+      {dirtyCount > 0 && (
+        <Box sx={{
+          position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 1200,
+          bgcolor: READOUT_BG, color: "#fff",
+          px: { xs: 2, md: 5 }, py: 1.5,
+          display: "flex", alignItems: "center", gap: 2, flexWrap: "wrap",
+          borderTop: `3px solid ${WARNING}`,
+        }}>
+          <Box sx={{ width: 10, height: 10, borderRadius: "50%", bgcolor: "#F2B544" }} />
+          <Typography sx={{ fontWeight: 700 }}>
+            {dirtyCount} ungespeicherte Änderung{dirtyCount > 1 ? "en" : ""}
+          </Typography>
+          <Typography variant="body2" sx={{ color: "#8A97A4", display: { xs: "none", sm: "block" } }}>
+            Strg+S zum Speichern
+          </Typography>
+          <Box flex={1} />
+          <Button onClick={discardAll} disabled={saving} sx={{ color: "#C9D2DB", borderRadius: 20 }}>Verwerfen</Button>
           <Button variant="contained" onClick={saveAll} disabled={saving} startIcon={<SaveIcon />}
-            sx={{ bgcolor: SUCCESS, borderRadius: 20, boxShadow: 'none', '&:hover': { bgcolor: '#166B48', boxShadow: 'none' } }}>
-            {saving ? "Speichern..." : "Alle speichern"}
+            sx={{ bgcolor: SUCCESS, borderRadius: 20, boxShadow: "none", "&:hover": { bgcolor: "#166B48", boxShadow: "none" } }}>
+            {saving ? "Wird gespeichert…" : "Änderungen speichern"}
           </Button>
         </Box>
-      </Box>
-      {message && <Alert severity={messageType === "success" ? "success" : "error"} sx={{ mb: 2, borderRadius: 2 }}>{message}</Alert>}
-      {groups.length === 0 ? (
-        <Typography sx={{ color: INK_MUTED }}>Keine aktiven Sensoren gefunden.</Typography>
-      ) : (
-        <div style={{ display: "flex", gap: 15, flexDirection: isMobile ? "column" : "row" }}>
-          <SensorColumn deviceGroups={col1} title="Gruppe 1" />
-          <SensorColumn deviceGroups={col2} title="Gruppe 2" />
-          <SensorColumn deviceGroups={col3} title="Gruppe 3" />
-        </div>
       )}
-    </Paper>
+    </Box>
   );
 };
 
@@ -832,8 +935,7 @@ const EnergyManager = () => {
       } catch (err) { errorCount++; console.error(`Fehler bei ${channel}:`, err); }
     }
 
-    // ✅ CORRECTION 1 : Mettre à jour le state local IMMÉDIATEMENT
-    // sans attendre la relecture du Messkoffer
+    // ✅ Mettre à jour le state local immédiatement
     setEnergyData(prev => {
       const updated = { ...prev };
       for (const channel of selectedEnergyChannels) {
@@ -855,8 +957,7 @@ const EnergyManager = () => {
     setLoading(false);
     setGlobalEnergyValue("");
 
-    // ✅ CORRECTION 2 : Relire depuis le serveur après 3s
-    // (le serveur attend déjà 2s avant de relire le Messkoffer)
+    // ✅ Relire depuis le serveur après 3s
     setTimeout(() => loadEnergyData(), 3000);
   };
 
@@ -865,11 +966,11 @@ const EnergyManager = () => {
   if (!energyData || typeof energyData !== "object" || Object.keys(energyData).length === 0)
     return <Typography sx={{ p: 3, color: INK_MUTED }}>Keine Daten verfügbar...</Typography>;
 
-  const entries     = Object.entries(energyData);
+  const entries       = Object.entries(energyData);
   const allChannels   = Object.keys(energyData);
   const selectedCount = selectedEnergyChannels.length;
   const totalCount    = allChannels.length;
-  const groups      = [
+  const groups        = [
     { channels: entries.slice(0, 6),   bgColor: SURFACE, title: "Kanäle A-F"   },
     { channels: entries.slice(6, 12),  bgColor: '#EEF1F4', title: "Kanäle G-L"  },
     { channels: entries.slice(12, 18), bgColor: '#F8F9FA', title: "Kanäle M-R" },
@@ -905,10 +1006,6 @@ const EnergyManager = () => {
               <Box sx={{ maxHeight: 300, overflow: "auto" }}>
                 {allChannels.map(ch => {
                   const chLabel = energyData[ch]?.label;
-                  // ✅ Toujours afficher le canal (CH1, CH2...) ; la Bezeichnung est
-                  // ajoutée seulement si elle est définie et différente du nom du
-                  // canal — évite d'avoir plusieurs entrées vides/identiques quand
-                  // la Bezeichnung n'est pas encore renseignée.
                   const displayText = (chLabel && chLabel !== ch)
                     ? <>{<ChannelLabel channel={ch} />} – {chLabel}</>
                     : <ChannelLabel channel={ch} />;
@@ -969,7 +1066,6 @@ const EnergyManager = () => {
                       <Typography variant="body2" sx={{ fontWeight: 600, color: INK }}>{data_?.label || <ChannelLabel channel={channel} />}</Typography>
                     </td>
                     <td style={{ padding: "8px", textAlign: "center" }}>
-                      {/* ✅ CORRECTION : afficher temporary (compteur temporaire voulu) */}
                       <Typography variant="body2" sx={{ fontWeight: 700, color: ACCENT, fontFamily: MONO_FONT }}>
                         {(data_?.temporary || 0).toFixed(2)} kWh
                       </Typography>
@@ -993,17 +1089,7 @@ const EnergyManager = () => {
   );
 };
 
-// ─── MAPPING METRIC OPTIONS (Strom / Wirkleistung / Spannung / Energie / Blindleistung / Scheinleistung) ────────────────
-// ✅ Étendu aux mesures de "Live Daten" (comme Kundendaten) — utilisé pour les
-// cartes Sensor et le résumé du détail. Blindleistung/Scheinleistung sont
-// désormais calculées côté React (voir computeDerivedFromUI plus haut), à
-// partir de Strom + CosinusPhi (lus en Modbus) et Spannung (Netz, partagée).
-// ✅ MODIFIÉ : Cosinus Phi retiré de l'affichage — le backend continue de le
-// calculer en interne (nécessaire pour Blindleistung/Scheinleistung).
-// ✅ CORRIGÉ : Energie affichée en kWh, telle qu'écrite par Node-RED (registre
-// Econsumed du Volt1000S, déjà en kWh) — aucune conversion d'unité n'est
-// faite en amont côté Node-RED, donc plus aucune ici non plus (cf.
-// formatMappingMetricValue plus haut).
+// ─── MAPPING METRIC OPTIONS ─────────────────────────────────────────────────
 const MAPPING_METRIC_OPTIONS = [
   { value: "Strom",         label: "Strom (A)",          icon: ElectricBoltIcon,        decimals: 3, unit: "A"   },
   { value: "CosinusPhi",    label: "Cosinus Phi",         icon: FunctionsIcon,           decimals: 4, unit: ""    },
@@ -1016,9 +1102,7 @@ const MAPPING_METRIC_OPTIONS = [
 const MAPPING_METRIC_LABELS = {
   Strom:          "Strom (A)",
   CosinusPhi:     "Cosinus Phi",
-  // ✅ AJOUT : "CosPhi" (nom du champ InfluxDB réel, distinct de la clé
-  // d'affichage "CosinusPhi" ci-dessus) — utilisé uniquement par le sélecteur
-  // d'historique (graphique), qui interroge directement ce champ brut.
+  // ✅ "CosPhi" = nom du champ InfluxDB réel, utilisé par le graphique historique
   CosPhi:         "Cosinus Phi",
   Wirkleistung:   "Wirkleistung (W)",
   Blindleistung:  "Blindleistung (var)",
@@ -1026,11 +1110,7 @@ const MAPPING_METRIC_LABELS = {
   Spannung:       "Spannung (V)",
   Energie:        "Energie (kWh)",
 };
-// ✅ MODIFIÉ : Strom, Wirkleistung, Blindleistung et CosPhi sont de nouveau
-// stockées brutes (lues en un seul bloc Modbus) — elles ont donc à nouveau
-// un historique réel par capteur/canal. Seules Spannung (device "Netz",
-// hors de ce sélecteur par capteur) et Scheinleistung (calculée, sans
-// historique propre) restent absentes de ce sélecteur.
+// ✅ Métriques avec historique réel par capteur/canal
 const MAPPING_HISTORY_METRIC_LABELS = {
   Strom:         "Strom (A)",
   Wirkleistung:  "Wirkleistung (W)",
@@ -1040,14 +1120,11 @@ const MAPPING_HISTORY_METRIC_LABELS = {
 };
 const KANAL_LABELS = { "1": "L1", "2": "L2", "3": "L3", "4": "N" };
 const KANAL_OPTIONS = ["1", "2", "3", "4"];
-// ✅ Couleur spécifique par Kanal (1-4), utilisée pour repérer visuellement
-// chaque canal d'un Sensor (Sensor-Bezeichnung, Mapping/Kundendaten).
+// ✅ Couleur par Kanal = couleur réelle du conducteur :
 // Kanal 1 = Braun, Kanal 2 = Schwarz, Kanal 3 = Grau, Kanal 4 = Blau.
 const KANAL_COLORS = { "1": "#795548", "2": "#000000", "3": "#757575", "4": "#1976d2" };
 
 // ─── MAPPING DETAIL (historique d'un Sensor/Kanal) ──────────────────────────
-// ✅ Habillage identique à la vue "Zeitsynchronisation" du portail : lecteurs
-// de valeurs sur fond sombre avec police mono, en-tête avec sélecteurs pilules.
 const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
   const [selectedKanal, setSelectedKanal]   = useState(initialKanal);
   const [selectedMetric, setSelectedMetric] = useState("Strom");
@@ -1069,11 +1146,7 @@ const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
           `${API_BASE_URL}/sensor-history/${device}/${selectedKanal}?metric=${selectedMetric}&time=${timeRange}`
         );
         if (!cancelled && res.data?.data) {
-          // ✅ CORRIGÉ : le serveur renvoie déjà "Energie" en kWh (registre
-          // Econsumed du Volt1000S, lu tel quel — cf. server.js /sensor-history)
-          // — plus aucune conversion à faire ici. Avant, une division par 1000
-          // supposait à tort un stockage en Wh et affichait des valeurs
-          // 1000x trop petites dans le graphique historique.
+          // ✅ "Energie" déjà en kWh — aucune conversion
           setHistoryData(res.data.data);
         }
       } catch (err) { console.error("Erreur historique sensor-history:", err); }
@@ -1152,7 +1225,6 @@ const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
           sx={{ bgcolor: SURFACE, color: INK_MUTED }} />
       </Paper>
 
-      {/* Résumé des valeurs actuelles — lecteurs mono foncés, cohérents avec Zeitsynchronisation */}
       <Box display="flex" gap={2} sx={{ mb: 2, flexWrap: "wrap" }}>
         {MAPPING_METRIC_OPTIONS.map(m => (
           <Paper key={m.value} elevation={0} sx={{ flex: 1, minWidth: 150, p: 0, textAlign: "center", overflow: 'hidden', bgcolor: PANEL }}>
@@ -1195,15 +1267,12 @@ const MappingDetail = ({ device, kanaele, initialKanal, onBack }) => {
 };
 
 // ─── MAPPING MANAGER (boxes style Echtzeit + filtres + détail) ──────────────
-// ✅ Habillage identique au portail : en-tête avec icône en cercle, filtres en
-// boutons pilule, tension de référence en lecteurs mono foncés, cartes Sensor
-// avec liseré de couleur par Kanal et effet de survol (translateY + ombre).
 const MappingManager = () => {
   const [sensors, setSensors]                       = useState([]);
   const [loading, setLoading]                       = useState(true);
   const [refreshing, setRefreshing]                 = useState(false);
   const [message, setMessage]                       = useState("");
-  const [messageType, setMessageType]                = useState("success");
+  const [messageType, setMessageType]               = useState("success");
   const [selectedSensors, setSelectedSensors]       = useState([]);
   const [selectedMappingMetrics, setSelectedMappingMetrics] = useState([]);
   const [selectedKanaele, setSelectedKanaele]       = useState([]);
@@ -1212,22 +1281,12 @@ const MappingManager = () => {
   const [detailKanal, setDetailKanal]               = useState(null);
   const isMobile = useMediaQuery("(max-width:600px)");
 
-  // ✅ CORRIGÉ : /sensors-discovery comptait TOUS les devices présents en
-  // base (Sensor1/2/3 + Netz = 4 "Sensoren erkannt"), au lieu du vrai nombre
-  // de capteurs physiquement chaînés. On utilise désormais /sensors-connected,
-  // qui interroge le nœud Node-RED "Sensoranzahl" (lecture Modbus réelle du
-  // nombre de capteurs sur le bus RS485) et exclut déjà "Netz" du décompte.
-  // isManualRefresh=true : clic sur le bouton "Aktualisieren" (affiche un
-  // message de confirmation) ; silent=true : rafraîchissement automatique
-  // en arrière-plan, sans spinner ni message.
+  // ✅ /sensors-connected : vrai nombre de capteurs sur le bus RS485 ("Netz" exclu)
   const loadSensors = async (isManualRefresh = false, silent = false) => {
     if (isManualRefresh) setRefreshing(true);
     else if (!silent) setLoading(true);
     try {
       const res = await axios.get(`${API_BASE_URL}/sensors-connected`);
-      // ✅ Le backend renvoie Strom, Wirkleistung, Blindleistung,
-      // Scheinleistung, CosinusPhi, Energie et Spannung tous bruts (lus
-      // directement depuis InfluxDB) — rien à recalculer côté React.
       setSensors(res.data?.sensors || []);
       if (isManualRefresh) {
         setMessageType("success");
@@ -1235,9 +1294,6 @@ const MappingManager = () => {
         setTimeout(() => setMessage(""), 3000);
       }
     } catch (err) {
-      // ✅ Une erreur lors d'un rafraîchissement silencieux ne doit pas
-      // spammer l'utilisateur toutes les secondes — seuls le chargement
-      // initial et le clic manuel affichent un message d'erreur.
       if (!silent) {
         setMessageType("error");
         setMessage("❌ Fehler beim Abrufen der Sensoren: " + (err.message || "Netzwerkproblem"));
@@ -1251,17 +1307,12 @@ const MappingManager = () => {
 
   useEffect(() => { loadSensors(false); }, []);
 
-  // ✅ Rafraîchissement automatique des valeurs (Strom, Energie, Cosinus Phi...)
-  // toutes les secondes, comme la vue "Live Daten" — en silencieux, sans
-  // recharger l'état "loading" ni le message de confirmation.
+  // ✅ Rafraîchissement silencieux toutes les secondes
   useEffect(() => {
     const iv = setInterval(() => loadSensors(false, true), 1000);
     return () => clearInterval(iv);
   }, []);
 
-  // ✅ Le device tension ("Netz", anciennement "Sensor0") est affiché à part,
-  // dans des boîtes Phase 1/2/3 comme sur l'onglet Echtzeit — pas comme une
-  // carte de capteur générique.
   const netzDevice   = sensors.find(s => s.device === "Netz" || s.device === "Sensor0");
   const otherSensors = sensors.filter(s => s !== netzDevice);
   const getNetzVoltage = (kanalNum) => {
@@ -1279,7 +1330,6 @@ const MappingManager = () => {
   const handleSelectAllMetrics = useCallback(() => setSelectedMappingMetrics(prev => prev.length === MAPPING_METRIC_OPTIONS.length ? [] : MAPPING_METRIC_OPTIONS.map(m => m.value)), []);
   const resetMappingFilters    = useCallback(() => { setSelectedSensors([]); setSelectedMappingMetrics([]); setSelectedKanaele([]); }, []);
 
-  // ✅ Filtre Kanal (indépendant de Sensoren et Messgrößen)
   const handleKanalToggle = (k) => {
     setSelectedKanaele(prev => prev.includes(k) ? prev.filter(x => x !== k) : [...prev, k]);
   };
@@ -1291,19 +1341,13 @@ const MappingManager = () => {
 
   const shouldShowSensor = device => selectedSensors.length === 0 || selectedSensors.includes(device);
   const shouldShowMetric = key    => selectedMappingMetrics.length === 0 || selectedMappingMetrics.includes(key);
-  const shouldShowKanal   = kanal  => selectedKanaele.length === 0 || selectedKanaele.includes(kanal);
+  const shouldShowKanal  = kanal  => selectedKanaele.length === 0 || selectedKanaele.includes(kanal);
 
-  // ✅ Reset logiciel du compteur Energie (baseline soustraite côté serveur).
-  // Le compteur matériel du Volt1000S continue de tourner en arrière-plan ;
-  // seul l'affichage repart de 0. Un dialogue MUI (plutôt qu'un window.confirm
-  // du navigateur) permet un texte professionnel en allemand et une icône
-  // cohérente avec le reste de l'interface.
-  const [resetTarget, setResetTarget]   = useState(null); // { device, kanal } | null
+  // ✅ Reset logiciel du compteur Energie (baseline soustraite côté serveur)
+  const [resetTarget, setResetTarget]   = useState(null);
   const [resetLoading, setResetLoading] = useState(false);
 
-  // ✅ Retire toute adresse IP (ex: présente dans une URL d'erreur réseau)
-  // avant d'afficher un message à l'utilisateur — aucune IP interne ne doit
-  // apparaître dans l'interface.
+  // ✅ Retire toute adresse IP d'un message d'erreur affiché
   const stripIps = (text) =>
     String(text || "")
       .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b(:\d+)?/g, "")
@@ -1377,8 +1421,6 @@ const MappingManager = () => {
               orderedChannels={allDeviceNames} metricOptions={MAPPING_METRIC_OPTIONS} mobileDrawer
               itemsLabel="Sensoren" />
 
-            {/* ✅ Filtre Kanal indépendant (1/2/3/4 → L1/L2/L3/N), appliqué après
-                le filtre Sensoren ci-dessus */}
             <Button variant="outlined" onClick={e => { e.stopPropagation(); setKanalAnchorEl(e.currentTarget); }}
               endIcon={<span>▼</span>} sx={{ minWidth: 150, borderRadius: 20, borderColor: BORDER, color: INK }}>
               {selKaCount === 0 || selKaCount === totKaCount ? "Alle Kanäle" : `${selKaCount} Kanäle`}
@@ -1411,8 +1453,6 @@ const MappingManager = () => {
             </Button>
           </Box>
         </Box>
-        {/* ✅ SIMPLIFIÉ : plus de bascule Verlauf — toujours uniquement les
-            capteurs actuellement actifs (fenêtre de 15s côté backend). */}
         <Typography variant="caption" sx={{ display: "block", mt: 1.5, color: INK_MUTED }}>
           Anzeige: nur Sensoren, die aktuell Daten senden.
         </Typography>
@@ -1454,9 +1494,6 @@ const MappingManager = () => {
           const visibleMetricsExist = cardMetrics.some(m => shouldShowMetric(m.value));
           if (!visibleMetricsExist || visibleKanaele.length === 0) return null;
           return (
-            // ✅ Une section par Sensor : titre clair au-dessus, puis une rangée
-            // de cartes — une carte par Kanal — pour que le client comprenne
-            // immédiatement à quel Sensor appartient chaque Kanal affiché.
             <Box key={device} sx={{ mb: "28px" }}>
               <Box display="flex" alignItems="center" gap={1} sx={{ mb: "10px" }}>
                 <Box sx={{ display: 'inline-flex', width: 26, height: 26, borderRadius: '50%', bgcolor: BRAND_BG, alignItems: 'center', justifyContent: 'center' }}>
@@ -1493,9 +1530,6 @@ const MappingManager = () => {
                           </Box>
                           <Box display="flex" alignItems="center" gap={0.5}>
                             <ValueBadge>{formatMappingMetricValue(m, k[m.value])}</ValueBadge>
-                            {/* ✅ Espace réservé de largeur fixe sur TOUTES les lignes (même
-                                sans icône) — évite que la ligne Energie décale son ValueBadge
-                                par rapport aux autres lignes (Strom, Wirkleistung, etc.) */}
                             <Box sx={{ width: 26, height: 26, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                               {m.value === "Energie" && (
                                 <IconButton size="small" onClick={(e) => handleResetEnergieClick(device, k.kanal, e)}
@@ -1516,9 +1550,6 @@ const MappingManager = () => {
         })
       )}
 
-      {/* ✅ Dialogue de confirmation professionnel (allemand), remplace
-          window.confirm — icône cohérente avec le design du portail, aucune
-          adresse IP n'y est jamais affichée. */}
       <Dialog open={Boolean(resetTarget)} onClose={() => !resetLoading && setResetTarget(null)}
         PaperProps={{ sx: { borderRadius: "16px" } }}>
         <DialogTitle sx={{ display: "flex", alignItems: "center", gap: 1.5, pb: 1 }}>
@@ -1575,11 +1606,7 @@ function AppContent() {
   useEffect(() => {
     const params    = new URLSearchParams(window.location.search);
     const viewParam = params.get("view");
-    // ✅ "mapping" ajouté pour permettre l'accès direct via ?view=mapping
-    // (l'onglet a été retiré de la NavBar, l'accès se fait désormais depuis
-    // le portail externe, onglet "Einstellungen")
-    // ✅ "sensorconfig" ajouté : vue Sensor-Bezeichnung (Kundendaten), même
-    // principe que "mapping" — accessible uniquement via le portail externe.
+    // ✅ "mapping" et "sensorconfig" accessibles via le portail externe
     if (["config", "graphMenu", "dashboard", "energy", "mapping", "sensorconfig"].includes(viewParam)) setView(viewParam);
   }, []);
 
@@ -1645,7 +1672,7 @@ function AppContent() {
   const shouldShowTrendChannel = ch  => trendSelectedChannels.length === 0 || trendSelectedChannels.includes(ch);
   const shouldShowTrendMetric  = key => trendSelectedMetrics.length === 0  || trendSelectedMetrics.includes(key);
 
-  const grafanaUrl = "http://192.168.1.20:3000/d/adrxt9v/energie?orgId=1&from=now-30m&to=now&timezone=browser&var-Kanal=CH1%20a&refresh=5s";
+  const grafanaUrl = "http://172.16.1.177:3000/d/adrxt9v/energie?orgId=1&from=now-30m&to=now&timezone=browser&var-Kanal=CH1%20a&refresh=5s";
 
   // ── NavBar ──
   const NavBar = () => (
@@ -1656,8 +1683,6 @@ function AppContent() {
           <Typography variant="h6" sx={{ fontSize: isMobile ? "1rem" : "1.25rem", color: INK }}>Energy Monitor</Typography>
         </Box>
         <Box display="flex" gap={1}>
-          {/* ✅ Onglet "Mapping" retiré de la NavBar — accès désormais via
-              le portail externe (Einstellungen) qui ouvre ?view=mapping */}
           {[
             { key: "dashboard", label: "Echtzeit", icon: <DashboardIcon /> },
             { key: "graphMenu", label: "Trends",   icon: <ShowChartIcon /> },
@@ -1763,7 +1788,6 @@ function AppContent() {
           </Box>
         </Paper>
 
-        {/* Spannungen — lecteurs mono foncés, comme la vue Zeitsynchronisation du portail */}
         <Box display="flex" gap={2} sx={{ mb: "25px", flexDirection: isMobile ? "column" : "row" }}>
           {[{ phase: "Phase 1", voltage: voltages.L1, label: "Spannung L1" },
             { phase: "Phase 2", voltage: voltages.L2, label: "Spannung L2" },

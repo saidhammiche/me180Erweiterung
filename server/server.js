@@ -645,7 +645,7 @@ app.get("/sensors-discovery", async (req, res) => {
 
 // ========== ROUTE "CAPTEURS RÉELLEMENT CONNECTÉS" (via Node-RED) ==========
 
-const NODERED_URL = process.env.NODERED_URL || "http://192.168.1.20:1880";
+const NODERED_URL = process.env.NODERED_URL || "http://172.16.1.177:1880";
 
 async function getRealConnectedSensorCount() {
     const url = `${NODERED_URL}/sensoranzahl`;

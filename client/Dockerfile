@@ -3,7 +3,7 @@ WORKDIR /app
 COPY package*.json ./
 COPY node_modules ./node_modules
 COPY . .
-RUN npm run build
+RUN node node_modules/react-scripts/bin/react-scripts.js build
 
 FROM nginx:1.27-alpine
 COPY --from=builder /app/build /usr/share/nginx/html
