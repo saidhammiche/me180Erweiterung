@@ -24,8 +24,8 @@ const writeApi = influxDB.getWriteApi(INFLUX_ORG, INFLUX_BUCKET);
 
 // ========== CONTRÔLEURS mE180 ==========
 //   .env :
-//     MESSE_IP=192.168.1.7    MESSE_ID=51105    MEGO_MEASUREMENT=mego    mego_DEVICE=mE180
-//     MESSE_IP_2=192.168.1.8  MESSE_ID_2=51105  MEGO_MEASUREMENT_2=mego1  mego_DEVICE_2=
+//     MESSE_IP=10.0.5.233    MESSE_ID=51105    MEGO_MEASUREMENT=mego    mego_DEVICE=mE180
+//     MESSE_IP_2=10.0.5.234  MESSE_ID_2=51105  MEGO_MEASUREMENT_2=mego1  mego_DEVICE_2=
 //
 // ✅ Les deux écritures sont acceptées : mego_DEVICE / MEGO4_DEVICE (idem _2).
 // Si la variable Device est vide, on ne filtre PAS sur le tag Device.
