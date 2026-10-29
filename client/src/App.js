@@ -1320,7 +1320,7 @@ function AppContent() {
   const shouldShowTrendChannel = ch  => trendSelectedChannels.length === 0 || trendSelectedChannels.includes(ch);
   const shouldShowTrendMetric  = key => trendSelectedMetrics.length === 0  || trendSelectedMetrics.includes(key);
 
-  const grafanaUrl = "http://10.0.5.232:3000/d/adkdpz6/energie?orgId=1&from=now-15m&to=now&timezone=browser&var-Kanal=CH1%20a&refresh=5s";
+  const grafanaUrl = "http://10.0.5.232:3000/d/adrxt9v/energie?from=now-30m&to=now&timezone=browser&var-Kanal=PH1%20a&refresh=5s&var-Tabelle=mego";
 
   // ── NavBar ──
   const NavBar = () => (

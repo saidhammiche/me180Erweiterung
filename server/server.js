@@ -22,6 +22,27 @@ const influxDB = new InfluxDB({ url: INFLUX_URL, token: INFLUX_TOKEN });
 const queryApi = influxDB.getQueryApi(INFLUX_ORG);
 const writeApi = influxDB.getWriteApi(INFLUX_ORG, INFLUX_BUCKET);
 
+// ========== KANÄLE ==========
+const channelsList = [
+    "CH1 a", "CH1 b", "CH1 c", "CH1 d", "CH1 e", "CH1 f",
+    "CH2 g", "CH2 h", "CH2 i", "CH2 j", "CH2 k", "CH2 l",
+    "CH3 m", "CH3 n", "CH3 o", "CH3 p", "CH3 q", "CH3 r"
+];
+
+// ========== FACTEUR ×10 (par contrôleur, désactivé par défaut) ==========
+// ✅ Par défaut AUCUN facteur : l'interface affiche exactement les mêmes
+//    valeurs que le contrôleur.
+// Si un jour un contrôleur a besoin du ×10, l'activer dans le .env :
+//     CHANNELS_X10=5,6,11,12,17,18      (contrôleur 1)
+//     CHANNELS_X10_2=5,6,11,12,17,18    (contrôleur 2)
+function parseX10Channels(envValue) {
+    if (!envValue || !String(envValue).trim()) return new Set();
+    const nums = String(envValue).split(/[,; ]+/)
+        .map(n => parseInt(n, 10))
+        .filter(n => n >= 1 && n <= 18);
+    return new Set(nums.map(n => channelsList[n - 1]));
+}
+
 // ========== CONTRÔLEURS mE180 ==========
 //   .env :
 //     MESSE_IP=10.0.5.233    MESSE_ID=51105    MEGO_MEASUREMENT=mego    mego_DEVICE=mE180
@@ -31,7 +52,7 @@ const writeApi = influxDB.getWriteApi(INFLUX_ORG, INFLUX_BUCKET);
 // Si la variable Device est vide, on ne filtre PAS sur le tag Device.
 const CONTROLLERS = {};
 
-function addController(num, ip, id, device, label, measurement) {
+function addController(num, ip, id, device, label, measurement, x10Env) {
     if (!ip || !id) return;
     CONTROLLERS[num] = {
         num,
@@ -40,6 +61,7 @@ function addController(num, ip, id, device, label, measurement) {
         device:      (device || "").trim(),
         measurement: measurement,
         label:       label || `Controller ${num}`,
+        x10:         parseX10Channels(x10Env),
         channelConfig: {},
         energyConfig:  {},
     };
@@ -47,10 +69,12 @@ function addController(num, ip, id, device, label, measurement) {
 
 addController("1", process.env.MESSE_IP,   process.env.MESSE_ID,
     process.env.mego_DEVICE ?? process.env.MEGO4_DEVICE ?? "mE180", process.env.MESSE_LABEL,
-    process.env.MEGO_MEASUREMENT || "mego");
+    process.env.MEGO_MEASUREMENT || "mego",
+    process.env.CHANNELS_X10);
 addController("2", process.env.MESSE_IP_2, process.env.MESSE_ID_2,
     process.env.mego_DEVICE_2 ?? process.env.MEGO4_DEVICE_2 ?? "", process.env.MESSE_LABEL_2,
-    process.env.MEGO_MEASUREMENT_2 || "mego1");
+    process.env.MEGO_MEASUREMENT_2 || "mego1",
+    process.env.CHANNELS_X10_2);
 
 if (!CONTROLLERS["1"]) {
     console.error("❌ ERREUR: Variables Messkoffer manquantes (MESSE_IP / MESSE_ID). Vérifiez votre fichier .env");
@@ -74,8 +98,6 @@ function getCtrl(req, res) {
 const fluxStr = (s) => String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 
 // ✅ Filtres Flux communs : table du contrôleur + Device (si défini).
-// "not exists r.Device" : si la colonne Device n'existe pas (ou s'appelle
-// autrement), les lignes ne sont plus rejetées.
 function fluxSourceFilters(ctrl) {
     let f = `|> filter(fn: (r) => r._measurement == "${fluxStr(ctrl.measurement)}")`;
     if (ctrl.device) {
@@ -95,13 +117,6 @@ function parseMesskofferNumber(raw) {
     return Number.isFinite(n) ? n : null;
 }
 
-// ========== KANÄLE ==========
-const channelsList = [
-    "CH1 a", "CH1 b", "CH1 c", "CH1 d", "CH1 e", "CH1 f",
-    "CH2 g", "CH2 h", "CH2 i", "CH2 j", "CH2 k", "CH2 l",
-    "CH3 m", "CH3 n", "CH3 o", "CH3 p", "CH3 q", "CH3 r"
-];
-
 // ✅ Les tables n'écrivent pas le canal de la même façon :
 //    mego  → "PH1 a"   ·   mego1 → "CH1 a"
 // Tout est ramené au format interne "CH1 a".
@@ -109,7 +124,6 @@ function normalizeKanal(k) {
     const m = String(k ?? "").trim().match(/^(?:CH|PH|Ph)\s*(\d+)\s*([a-r])$/i);
     return m ? `CH${m[1]} ${m[2].toLowerCase()}` : String(k ?? "").trim();
 }
-// Toutes les écritures possibles d'un canal, pour les filtres Flux.
 function kanalVariants(ch) {
     const m = String(ch).match(/^CH(\d+)\s+([a-r])$/i);
     if (!m) return [ch];
@@ -124,11 +138,10 @@ function getChannelNumber(ch) {
     return idx === -1 ? null : idx + 1;
 }
 
-const CHANNELS_X10 = [5, 6, 11, 12, 17, 18].map(num => channelsList[num - 1]);
-
-function applyX10IfNeeded(ch, value) {
+// ✅ ×10 uniquement si activé pour CE contrôleur dans le .env (sinon valeur brute)
+function applyX10IfNeeded(ctrl, ch, value) {
     if (value === null || value === undefined || isNaN(value)) return value;
-    return CHANNELS_X10.includes(ch) ? value * 10 : value;
+    return ctrl.x10.has(ch) ? value * 10 : value;
 }
 
 // ========== ENCODAGE MESSKOFFER (Latin1 / Windows-1252) ==========
@@ -388,14 +401,12 @@ app.get("/controllers", (req, res) => {
         ip:          c.ip,
         measurement: c.measurement,
         device:      c.device || null,
+        x10Channels: [...c.x10],
         ready:       Object.values(c.channelConfig).some(cfg => cfg.updatedAt > 0)
     })));
 });
 
 // ========== DIAGNOSTIC INFLUXDB ==========
-// ✅ GET /debug/influx?controller=1
-// Montre ce que la table contient vraiment (tags, Kanal, Device, champs) et
-// combien de lignes passent les filtres du serveur.
 const cleanRow = ({ result, table, ...rest }) => rest;
 
 app.get("/debug/influx", async (req, res) => {
@@ -434,6 +445,7 @@ app.get("/debug/influx", async (req, res) => {
         bucket:      INFLUX_BUCKET,
         measurement: ctrl.measurement,
         deviceFilter: ctrl.device || "(kein Filter)",
+        x10Channels: [...ctrl.x10],
         tagKeys:     values(tagKeys),
         kanalValues: values(kanaele),
         deviceValues: values(devices),
@@ -654,9 +666,6 @@ function computeApparentAndReactive(P, cosPhi) {
 }
 
 // ========== ROUTE DATA (Echtzeit) ==========
-// ✅ Une seule requête Flux pour les 18 canaux, identifiés par table + Device
-// + Kanal. Le filtre sur "Label" est supprimé : il bloquait tout dès que la
-// Bezeichnung du Messkoffer différait du tag Label écrit dans InfluxDB.
 app.get("/data", async (req, res) => {
     const ctrl = getCtrl(req, res); if (!ctrl) return;
     try {
@@ -716,13 +725,13 @@ app.get("/data", async (req, res) => {
 
             result[ch] = {
                 Label:          ctrl.channelConfig[ch]?.label || ch,
-                Strom:          absOrNull(applyX10IfNeeded(ch, I)),
-                Wirkleistung:   applyX10IfNeeded(ch, P),
-                Spannung:       U,   // ✅ la tension de phase n'est jamais ×10
+                Strom:          absOrNull(applyX10IfNeeded(ctrl, ch, I)),
+                Wirkleistung:   applyX10IfNeeded(ctrl, ch, P),
+                Spannung:       U,
                 CosinusPhi:     cosPhi,
                 Energie_temp:   rawEnergie,
-                Scheinleistung: applyX10IfNeeded(ch, S),
-                Blindleistung:  applyX10IfNeeded(ch, Q)
+                Scheinleistung: applyX10IfNeeded(ctrl, ch, S),
+                Blindleistung:  applyX10IfNeeded(ctrl, ch, Q)
             };
         });
 
@@ -734,7 +743,6 @@ app.get("/data", async (req, res) => {
 });
 
 // ========== ROUTE HISTORY ==========
-// ✅ Même logique : table + Device + Kanal, sans filtre Label.
 app.get("/history/:channel", async (req, res) => {
     const ctrl = getCtrl(req, res); if (!ctrl) return;
     const ch = req.params.channel;
@@ -774,12 +782,12 @@ app.get("/history/:channel", async (req, res) => {
                 const { S, Q } = computeApparentAndReactive(point.Wirkleistung ?? null, point.CosinusPhi ?? null);
                 return {
                     time:           point.time,
-                    Strom:          absOrNull(applyX10IfNeeded(ch, point.Strom ?? null)),
-                    Wirkleistung:   applyX10IfNeeded(ch, point.Wirkleistung ?? null),
+                    Strom:          absOrNull(applyX10IfNeeded(ctrl, ch, point.Strom ?? null)),
+                    Wirkleistung:   applyX10IfNeeded(ctrl, ch, point.Wirkleistung ?? null),
                     CosinusPhi:     point.CosinusPhi ?? null,
                     Energie:        point.Energie ?? null,
-                    Scheinleistung: applyX10IfNeeded(ch, S),
-                    Blindleistung:  applyX10IfNeeded(ch, Q)
+                    Scheinleistung: applyX10IfNeeded(ctrl, ch, S),
+                    Blindleistung:  applyX10IfNeeded(ctrl, ch, Q)
                 };
             })
             .sort((a, b) => new Date(a.time) - new Date(b.time));
@@ -804,7 +812,6 @@ app.get("/voltages", async (req, res) => {
 });
 
 // ========== CONTRÔLE AU DÉMARRAGE ==========
-// ✅ Affiche dans les logs combien de lignes InfluxDB chaque contrôleur trouve.
 async function startupInfluxCheck() {
     for (const ctrl of Object.values(CONTROLLERS)) {
         const q = `
@@ -827,9 +834,9 @@ async function startupInfluxCheck() {
 app.listen(4000, "0.0.0.0", () => {
     console.log("✅ Server läuft auf Port 4000");
     console.log(`   InfluxDB : ${INFLUX_URL} | Bucket: ${INFLUX_BUCKET}`);
-    Object.values(CONTROLLERS).forEach(c =>
-        console.log(`   [${c.num}] ${c.label}: ${c.ip} | ID: ${c.id} | Measurement: ${c.measurement} | Device: ${c.device || "(kein Filter)"}`)
-    );
-    console.log(`   Canaux ×10: ${CHANNELS_X10.join(", ")}`);
+    Object.values(CONTROLLERS).forEach(c => {
+        console.log(`   [${c.num}] ${c.label}: ${c.ip} | ID: ${c.id} | Measurement: ${c.measurement} | Device: ${c.device || "(kein Filter)"}`);
+        console.log(`       Faktor ×10: ${c.x10.size ? [...c.x10].join(", ") : "keiner (Werte wie im Controller)"}`);
+    });
     startupInfluxCheck();
 });
