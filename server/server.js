@@ -208,6 +208,12 @@ function initEnergyConfig(ctrl) {
 
 Object.values(CONTROLLERS).forEach(ctrl => { initConfig(ctrl); initEnergyConfig(ctrl); });
 
+// ✅ Vrai si les labels sont encore tous au nom par défaut ("CH1 a", "CH1 b"…),
+//    donc si la lecture des vrais labels depuis le Messkoffer n'a pas abouti.
+function labelsSindStandard(ctrl) {
+    return channelsList.every(ch => (ctrl.channelConfig[ch]?.label || ch) === ch);
+}
+
 // ========== MESSKOFFER CGI HELPERS ==========
 
 async function getLabelsFromMesskoffer(ctrl) {
@@ -347,6 +353,10 @@ async function getVoltagesFromMesskoffer(ctrl) {
 }
 
 // ========== INIT CONFIG DEPUIS MESSKOFFER (avec retry) ==========
+// ✅ Correctif : on ne considère la config comme "chargée" que si les LABELS
+//    ont bien été lus (pas seulement les scaleends). Sinon on réessaie, ce qui
+//    évite le cas "les données passent mais les labels restent par défaut"
+//    (typiquement le contrôleur 2 pas encore joignable au démarrage).
 async function initConfigFromMesskoffer(ctrl, retryDelayMs = 3000, maxAttempts = 0) {
     let attempt = 0;
     while (true) {
@@ -366,6 +376,16 @@ async function initConfigFromMesskoffer(ctrl, retryDelayMs = 3000, maxAttempts =
                     updatedAt:   Date.now()
                 };
             }
+
+            // ✅ Si les labels n'ont pas été lus (null) alors qu'on a encore des
+            //    tentatives, on réessaie : les scaleends répondent parfois avant
+            //    que les labels soient disponibles.
+            if (labels === null && (maxAttempts === 0 || attempt < maxAttempts)) {
+                console.warn(`[${ctrl.label}] Labels noch nicht gelesen (Versuch ${attempt}), retry in ${retryDelayMs}ms...`);
+                await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+                continue;
+            }
+
             console.log(`[${ctrl.label}] Konfiguration geladen (Versuch ${attempt})`);
             return;
         }
@@ -382,7 +402,19 @@ async function initConfigFromMesskoffer(ctrl, retryDelayMs = 3000, maxAttempts =
     }
 }
 
-Object.values(CONTROLLERS).forEach(ctrl => initConfigFromMesskoffer(ctrl));
+// ✅ Chargement initial + filet de sécurité : 15 s après le démarrage, si les
+//    labels d'un contrôleur sont restés au nom par défaut (Messkoffer pas encore
+//    joignable, p. ex. le 2 derrière le VPN), on relance une lecture complète.
+//    Plus besoin de taper manuellement le reload du contrôleur 2.
+Object.values(CONTROLLERS).forEach(ctrl => {
+    initConfigFromMesskoffer(ctrl);
+    setTimeout(() => {
+        if (labelsSindStandard(ctrl)) {
+            console.warn(`[${ctrl.label}] Labels noch Standard nach Start → erneuter Reload...`);
+            initConfigFromMesskoffer(ctrl, 3000, 3);
+        }
+    }, 15000);
+});
 
 const ENERGY_EPSILON = 1e-6;
 const hasEnergyChanged = (a, b) => Math.abs((a ?? 0) - (b ?? 0)) > ENERGY_EPSILON;
