@@ -33,6 +33,10 @@ USER nginx
 EXPOSE 5000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+<<<<<<< HEAD
   CMD wget --quiet --tries=1 --spider http://10.0.5.232:5000/health || exit 1
+=======
+  CMD wget --quiet --tries=1 --spider http://172.24.7.221:5000/health || exit 1
+>>>>>>> 88493217d (Mes modifications locales)
 
 CMD ["nginx", "-g", "daemon off;"]
