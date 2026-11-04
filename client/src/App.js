@@ -98,7 +98,7 @@ const theme = createTheme({
 });
 
 const API_BASE_URL = `${window.location.protocol}//${window.location.hostname}:4000`;
-const STARTSEITE_URL = "http://10.0.5.232:8080";
+const STARTSEITE_URL = "http://172.24.7.221:8080";
 
 // ✅ Contrôleur actif lu dans l'URL (?controller=1|2, 1 par défaut) et ajouté
 // automatiquement à chaque requête envoyée au serveur API.
@@ -1320,7 +1320,7 @@ function AppContent() {
   const shouldShowTrendChannel = ch  => trendSelectedChannels.length === 0 || trendSelectedChannels.includes(ch);
   const shouldShowTrendMetric  = key => trendSelectedMetrics.length === 0  || trendSelectedMetrics.includes(key);
 
-  const grafanaUrl = "http://10.0.5.232:3000/d/adrxt9v/energie?from=now-30m&to=now&timezone=browser&var-Kanal=PH1%20a&refresh=5s&var-Tabelle=mego";
+  const grafanaUrl = "http://172.24.7.221:3000/d/adrxt9v/energie?from=now-30m&to=now&timezone=browser&var-Kanal=PH1%20a&refresh=5s&var-Tabelle=mego";
 
   // ── NavBar ──
   const NavBar = () => (
